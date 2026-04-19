@@ -153,6 +153,11 @@ pub struct App {
     pub chart_height: u16,
     pub recs_height: u16,
     pub resize_target: Option<ResizeTarget>,
+    // search / fuzzy filter
+    pub search_active: bool,
+    pub search_query: String,
+    pub fuzzy_pids: Option<HashSet<u32>>,
+    pub fuzzy_bucket_labels: Option<HashSet<String>>,
 }
 
 impl App {
@@ -178,6 +183,105 @@ impl App {
             chart_height: 18,
             recs_height: 8,
             resize_target: None,
+            search_active: false,
+            search_query: String::new(),
+            fuzzy_pids: None,
+            fuzzy_bucket_labels: None,
+        }
+    }
+
+    // --- Search ---
+    pub fn enter_search(&mut self) {
+        self.search_active = true;
+        // keep any prior query so '/' toggles back to the last search
+        self.recompute_search();
+    }
+
+    pub fn exit_search_commit(&mut self) {
+        self.search_active = false;
+        // filter stays applied
+    }
+
+    pub fn exit_search_cancel(&mut self) {
+        self.search_active = false;
+        self.search_query.clear();
+        self.fuzzy_pids = None;
+        self.fuzzy_bucket_labels = None;
+    }
+
+    pub fn search_push(&mut self, c: char) {
+        self.search_query.push(c);
+        self.recompute_search();
+    }
+
+    pub fn search_pop(&mut self) {
+        self.search_query.pop();
+        self.recompute_search();
+    }
+
+    pub fn recompute_search(&mut self) {
+        if self.search_query.is_empty() {
+            self.fuzzy_pids = None;
+            self.fuzzy_bucket_labels = None;
+            return;
+        }
+        use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+        use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(
+            &self.search_query,
+            CaseMatching::Smart,
+            Normalization::Smart,
+        );
+
+        let mut pids: HashSet<u32> = HashSet::new();
+        if let Some(latest) = self.history.latest() {
+            for p in &latest.procs {
+                let cwd_s = p
+                    .cwd
+                    .as_ref()
+                    .map(|c| c.display().to_string())
+                    .unwrap_or_default();
+                let haystack = format!("{} {} {}", p.name, p.cmd, cwd_s);
+                let mut buf = Vec::new();
+                if pattern
+                    .score(Utf32Str::new(&haystack, &mut buf), &mut matcher)
+                    .is_some()
+                {
+                    pids.insert(p.pid);
+                }
+            }
+        }
+
+        let mut labels: HashSet<String> = HashSet::new();
+        for b in &self.buckets {
+            let label = b.key.label();
+            let mut buf = Vec::new();
+            let matches_label = pattern
+                .score(Utf32Str::new(&label, &mut buf), &mut matcher)
+                .is_some();
+            let has_matching_proc = b.pids.iter().any(|pid| pids.contains(pid));
+            if matches_label || has_matching_proc {
+                labels.insert(label);
+            }
+        }
+
+        self.fuzzy_pids = Some(pids);
+        self.fuzzy_bucket_labels = Some(labels);
+    }
+
+    pub fn pid_visible(&self, pid: u32) -> bool {
+        match &self.fuzzy_pids {
+            None => true,
+            Some(set) => set.contains(&pid),
+        }
+    }
+
+    pub fn bucket_visible(&self, label: &str) -> bool {
+        match &self.fuzzy_bucket_labels {
+            None => true,
+            Some(set) => set.contains(label),
         }
     }
 
@@ -203,6 +307,12 @@ impl App {
         self.rebucket(&snap);
         self.history.push(snap);
         self.refresh_local_recs();
+        if self.search_query.is_empty() {
+            self.fuzzy_pids = None;
+            self.fuzzy_bucket_labels = None;
+        } else {
+            self.recompute_search();
+        }
     }
 
     fn refresh_local_recs(&mut self) {
@@ -302,14 +412,22 @@ impl App {
             return Vec::new();
         };
         let mut v: Vec<&ProcSample> = match &self.selection {
-            Selection::All => latest.procs.iter().collect(),
+            Selection::All => latest
+                .procs
+                .iter()
+                .filter(|p| self.pid_visible(p.pid))
+                .collect(),
             Selection::Bucket(label) | Selection::Process(label, _) => {
                 let Some(bucket) = self.buckets.iter().find(|b| b.key.label() == *label) else {
                     return Vec::new();
                 };
                 let pids: std::collections::HashSet<u32> =
                     bucket.pids.iter().copied().collect();
-                latest.procs.iter().filter(|p| pids.contains(&p.pid)).collect()
+                latest
+                    .procs
+                    .iter()
+                    .filter(|p| pids.contains(&p.pid) && self.pid_visible(p.pid))
+                    .collect()
             }
         };
         match self.sort {
@@ -435,6 +553,9 @@ impl App {
         });
         for bucket in &self.buckets {
             let label = bucket.key.label();
+            if !self.bucket_visible(&label) {
+                continue;
+            }
             let expanded = !self.collapsed.contains(&label);
             out.push(TreeRow {
                 depth: 0,
@@ -452,12 +573,13 @@ impl App {
                     let mut procs: Vec<&ProcSample> = latest
                         .procs
                         .iter()
-                        .filter(|p| pids.contains(&p.pid))
+                        .filter(|p| pids.contains(&p.pid) && self.pid_visible(p.pid))
                         .collect();
                     procs.sort_by(|a, b| {
                         b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)
                     });
-                    for p in procs.into_iter().take(12) {
+                    let limit = if self.search_query.is_empty() { 12 } else { 50 };
+                    for p in procs.into_iter().take(limit) {
                         out.push(TreeRow {
                             depth: 1,
                             label: format!("{} [{}]", truncate_for_tree(&p.name, 18), p.pid),

@@ -23,13 +23,31 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let title = format!("recommendations — {}", source);
     let block = titled_block(&title, active);
 
-    let items: Vec<ListItem> = if app.recommendations.is_empty() {
+    let filtered: Vec<&crate::llm::Recommendation> = app
+        .recommendations
+        .iter()
+        .filter(|r| {
+            if app.search_query.is_empty() {
+                return true;
+            }
+            if let Some(pid) = r.pid {
+                if app.pid_visible(pid) {
+                    return true;
+                }
+            }
+            let q = app.search_query.to_ascii_lowercase();
+            r.target.to_ascii_lowercase().contains(&q)
+                || r.reason.to_ascii_lowercase().contains(&q)
+        })
+        .collect();
+
+    let items: Vec<ListItem> = if filtered.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            "  no obvious wins right now. set OPENROUTER_API_KEY for smarter picks.",
+            "  no matching recommendations.",
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
-        app.recommendations
+        filtered
             .iter()
             .map(|r| {
                 let icon = match r.action.as_str() {
@@ -82,8 +100,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 
     let mut state = ListState::default();
-    if active && !app.recommendations.is_empty() {
-        state.select(Some(app.selected_rec.min(app.recommendations.len() - 1)));
+    if active && !filtered.is_empty() {
+        state.select(Some(app.selected_rec.min(filtered.len() - 1)));
     }
     f.render_stateful_widget(list, area, &mut state);
 }

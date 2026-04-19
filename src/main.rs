@@ -115,15 +115,37 @@ async fn main() -> Result<()> {
                     {
                         break;
                     }
+
+                    // Search-mode input hijacks most keys.
+                    if app.search_active {
+                        match key.code {
+                            KeyCode::Esc => app.exit_search_cancel(),
+                            KeyCode::Enter => app.exit_search_commit(),
+                            KeyCode::Backspace => app.search_pop(),
+                            KeyCode::Char(c)
+                                if !key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                            {
+                                app.search_push(c);
+                            }
+                            KeyCode::Up => app.nav_up(),
+                            KeyCode::Down => app.nav_down(),
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Esc => {
                             if app.show_help {
                                 app.show_help = false;
+                            } else if !app.search_query.is_empty() {
+                                app.exit_search_cancel();
                             } else {
                                 break;
                             }
                         }
+                        KeyCode::Char('/') => app.enter_search(),
                         KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('j') | KeyCode::Down => app.nav_down(),
                         KeyCode::Char('k') | KeyCode::Up => app.nav_up(),

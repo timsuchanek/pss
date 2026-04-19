@@ -50,8 +50,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App, metric: Metric) {
         None => "— all".to_string(),
     };
 
-    let selected_pids: Option<std::collections::HashSet<u32>> =
+    let mut selected_pids: Option<std::collections::HashSet<u32>> =
         app.selected_bucket_ref().map(|b| b.pids.iter().copied().collect());
+
+    // Intersect with the fuzzy-search pid filter, if active.
+    if let Some(fuzzy) = app.fuzzy_pids.as_ref() {
+        selected_pids = Some(match selected_pids {
+            Some(bucket) => bucket.intersection(fuzzy).copied().collect(),
+            None => fuzzy.clone(),
+        });
+    }
 
     let (series_pids, series_names) = pick_top_series(app, &selected_pids, metric);
     let legend_w = area.width.saturating_sub(2) as usize;

@@ -14,22 +14,54 @@ use crate::app::App;
 pub fn render(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
+    let search_h = if app.search_active || !app.search_query.is_empty() {
+        1
+    } else {
+        0
+    };
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(search_h),
             Constraint::Min(10),
             Constraint::Length(1),
         ])
         .split(size);
 
     render_header(f, outer[0], app);
-    render_body(f, outer[1], app);
-    render_footer(f, outer[2], app);
+    if search_h == 1 {
+        render_search_bar(f, outer[1], app);
+    }
+    render_body(f, outer[2], app);
+    render_footer(f, outer[3], app);
 
     if app.show_help {
         render_help(f, size);
     }
+}
+
+fn render_search_bar(f: &mut Frame, area: Rect, app: &App) {
+    let label = if app.search_active { " / " } else { " (filter) " };
+    let label_style = if app.search_active {
+        Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    };
+    let cursor = if app.search_active { "▎" } else { "" };
+    let hint = if !app.search_active {
+        "  (press / to edit, esc to clear)"
+    } else {
+        ""
+    };
+    let line = Line::from(vec![
+        Span::styled(label, label_style),
+        Span::raw(" "),
+        Span::styled(app.search_query.clone(), Style::default().fg(Color::White)),
+        Span::styled(cursor, Style::default().fg(Color::Cyan).add_modifier(Modifier::RAPID_BLINK)),
+        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_help(f: &mut Frame, area: Rect) {
@@ -50,8 +82,10 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from("  tab             cycle panes"),
         Line::from("  K                SIGTERM selected process or rec"),
         Line::from("  c / m / n        sort procs by cpu / mem / name"),
+        Line::from("  /                fuzzy filter (nucleo)"),
+        Line::from("  esc              clear filter / close overlay / quit"),
         Line::from("  ?                toggle this overlay"),
-        Line::from("  q / esc / ^C     quit"),
+        Line::from("  q / ^C           quit"),
         Line::from(""),
         Line::from(Span::styled(
             "  esc closes this overlay",
@@ -285,8 +319,12 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", kept)
 }
 
-fn render_footer(f: &mut Frame, area: Rect, _app: &App) {
-    let hint = "j/k nav · h/l pane · tab cycle · K kill · c/m/n sort · ? help · q quit";
+fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    let hint = if app.search_active {
+        "type to filter · enter commit · esc cancel · ↑↓ nav"
+    } else {
+        "j/k nav · h/l pane · tab cycle · K kill · c/m/n sort · / search · ? help · q quit"
+    };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
