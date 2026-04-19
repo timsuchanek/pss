@@ -49,8 +49,23 @@ fn render_search_bar(f: &mut Frame, area: Rect, app: &App) {
         Style::default().bg(Color::DarkGray).fg(Color::White)
     };
     let cursor = if app.search_active { "▎" } else { "" };
+    let count_text = if !app.search_query.is_empty() {
+        let procs = app
+            .fuzzy_pids
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let buckets = app
+            .fuzzy_bucket_labels
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        format!("   {} procs · {} projects", procs, buckets)
+    } else {
+        String::new()
+    };
     let hint = if !app.search_active {
-        "  (press / to edit, esc to clear)"
+        "   enter=commit · esc=clear"
     } else {
         ""
     };
@@ -59,6 +74,7 @@ fn render_search_bar(f: &mut Frame, area: Rect, app: &App) {
         Span::raw(" "),
         Span::styled(app.search_query.clone(), Style::default().fg(Color::White)),
         Span::styled(cursor, Style::default().fg(Color::Cyan).add_modifier(Modifier::RAPID_BLINK)),
+        Span::styled(count_text, Style::default().fg(Color::LightCyan)),
         Span::styled(hint, Style::default().fg(Color::DarkGray)),
     ]);
     f.render_widget(Paragraph::new(line), area);

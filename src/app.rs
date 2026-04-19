@@ -551,12 +551,15 @@ impl App {
             mem: self.buckets.iter().map(|b| b.mem).sum(),
             selection: Selection::All,
         });
+        let searching = !self.search_query.is_empty();
         for bucket in &self.buckets {
             let label = bucket.key.label();
             if !self.bucket_visible(&label) {
                 continue;
             }
-            let expanded = !self.collapsed.contains(&label);
+            // While searching, force every visible bucket open so matching
+            // children are actually visible.
+            let expanded = searching || !self.collapsed.contains(&label);
             out.push(TreeRow {
                 depth: 0,
                 label: label.clone(),

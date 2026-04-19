@@ -15,7 +15,12 @@ pub const COL_GUTTER: usize = 1;
 
 pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let active = app.pane == Pane::Sidebar;
-    let block = titled_block("projects", active);
+    let title = if !app.search_query.is_empty() {
+        format!("projects · filter: {}", app.search_query)
+    } else {
+        "projects".to_string()
+    };
+    let block = titled_block(&title, active);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
