@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::collector::{Collector, History, ProcSample, Snapshot};
+use crate::details::{self, Details};
 use crate::heuristics;
 use crate::llm::{LlmDigest, Recommendation};
 
@@ -160,6 +161,37 @@ pub struct App {
     pub fuzzy_bucket_labels: Option<HashSet<String>>,
     // drill-down modal
     pub drilldown_pid: Option<u32>,
+    pub drilldown_tab: DrilldownTab,
+    pub drilldown_details: Option<Details>,
+    pub drilldown_scroll: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrilldownTab {
+    Facts,
+    Env,
+    Files,
+    Sockets,
+    Tree,
+}
+
+impl DrilldownTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            DrilldownTab::Facts => "facts",
+            DrilldownTab::Env => "env",
+            DrilldownTab::Files => "files",
+            DrilldownTab::Sockets => "sockets",
+            DrilldownTab::Tree => "tree",
+        }
+    }
+    pub const ALL: [DrilldownTab; 5] = [
+        DrilldownTab::Facts,
+        DrilldownTab::Env,
+        DrilldownTab::Files,
+        DrilldownTab::Sockets,
+        DrilldownTab::Tree,
+    ];
 }
 
 impl App {
@@ -190,15 +222,124 @@ impl App {
             fuzzy_pids: None,
             fuzzy_bucket_labels: None,
             drilldown_pid: None,
+            drilldown_tab: DrilldownTab::Facts,
+            drilldown_details: None,
+            drilldown_scroll: 0,
         }
     }
 
     pub fn open_drilldown(&mut self, pid: u32) {
+        let changed = self.drilldown_pid != Some(pid);
         self.drilldown_pid = Some(pid);
+        self.drilldown_scroll = 0;
+        if changed {
+            self.drilldown_tab = DrilldownTab::Facts;
+            self.drilldown_details = Some(Details::default());
+        }
     }
 
     pub fn close_drilldown(&mut self) {
         self.drilldown_pid = None;
+        self.drilldown_details = None;
+        self.drilldown_scroll = 0;
+    }
+
+    pub fn drilldown_set_tab(&mut self, tab: DrilldownTab) {
+        self.drilldown_tab = tab;
+        self.drilldown_scroll = 0;
+        self.ensure_drilldown_loaded_for_tab();
+    }
+
+    pub fn drilldown_next_tab(&mut self) {
+        let cur = DrilldownTab::ALL
+            .iter()
+            .position(|t| *t == self.drilldown_tab)
+            .unwrap_or(0);
+        let next = (cur + 1) % DrilldownTab::ALL.len();
+        self.drilldown_set_tab(DrilldownTab::ALL[next]);
+    }
+
+    pub fn drilldown_prev_tab(&mut self) {
+        let cur = DrilldownTab::ALL
+            .iter()
+            .position(|t| *t == self.drilldown_tab)
+            .unwrap_or(0);
+        let next = (cur + DrilldownTab::ALL.len() - 1) % DrilldownTab::ALL.len();
+        self.drilldown_set_tab(DrilldownTab::ALL[next]);
+    }
+
+    pub fn drilldown_scroll_by(&mut self, delta: i32) {
+        let cur = self.drilldown_scroll as i32;
+        let next = (cur + delta).max(0) as u16;
+        self.drilldown_scroll = next;
+    }
+
+    /// Fetches data for the active drill-down tab if not already loaded.
+    pub fn ensure_drilldown_loaded_for_tab(&mut self) {
+        let Some(pid) = self.drilldown_pid else {
+            return;
+        };
+        let mut d = self.drilldown_details.take().unwrap_or_default();
+        match self.drilldown_tab {
+            DrilldownTab::Facts => {
+                if d.fds_count.is_none() || d.nice.is_none() {
+                    let (fds, nice) = details::fetch_fd_and_nice(pid);
+                    d.fds_count = fds;
+                    d.nice = nice;
+                }
+                if d.threads_count.is_none() {
+                    d.threads_count = details::fetch_threads_count(pid);
+                }
+            }
+            DrilldownTab::Env => {
+                if d.env.is_none() {
+                    d.env = Some(details::fetch_env(pid));
+                }
+            }
+            DrilldownTab::Files => {
+                if d.files.is_none() {
+                    d.files = Some(details::fetch_files(pid));
+                }
+            }
+            DrilldownTab::Sockets => {
+                if d.sockets.is_none() {
+                    d.sockets = Some(details::fetch_sockets(pid));
+                }
+            }
+            DrilldownTab::Tree => {
+                // computed inline at render time from app state
+            }
+        }
+        self.drilldown_details = Some(d);
+    }
+
+    pub fn refresh_drilldown(&mut self) {
+        // Clear the cache for the current pid so the active tab re-fetches.
+        self.drilldown_details = Some(Details::default());
+        self.drilldown_scroll = 0;
+        self.ensure_drilldown_loaded_for_tab();
+    }
+
+    /// Ancestors of `pid` walking up the ppid chain.
+    pub fn ancestors_of(&self, pid: u32) -> Vec<&ProcSample> {
+        let Some(latest) = self.history.latest() else {
+            return Vec::new();
+        };
+        let mut chain = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = latest.procs.iter().find(|p| p.pid == pid).and_then(|p| p.ppid);
+        while let Some(ppid) = cur {
+            if !seen.insert(ppid) {
+                break;
+            }
+            if let Some(parent) = latest.procs.iter().find(|p| p.pid == ppid) {
+                chain.push(parent);
+                cur = parent.ppid;
+            } else {
+                break;
+            }
+        }
+        chain
     }
 
     pub fn drilldown_proc(&self) -> Option<&ProcSample> {

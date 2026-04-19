@@ -1,6 +1,7 @@
 mod app;
 mod collector;
 mod config;
+mod details;
 mod heuristics;
 mod llm;
 mod ui;
@@ -22,7 +23,9 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
 
-use crate::app::{App, AppEvent, Pane, ResizeTarget, Selection, SidebarSortKey, SortKey};
+use crate::app::{
+    App, AppEvent, DrilldownTab, Pane, ResizeTarget, Selection, SidebarSortKey, SortKey,
+};
 use crate::collector::Collector;
 use crate::llm::LlmClient;
 
@@ -134,12 +137,75 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    // Drill-down modal hijacks a few keys when it's open.
+                    if app.drilldown_pid.is_some() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.close_drilldown();
+                                continue;
+                            }
+                            KeyCode::Char('r') => {
+                                app.refresh_drilldown();
+                                continue;
+                            }
+                            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                                app.drilldown_next_tab();
+                                continue;
+                            }
+                            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                                app.drilldown_prev_tab();
+                                continue;
+                            }
+                            KeyCode::Char('1') => {
+                                app.drilldown_set_tab(DrilldownTab::Facts);
+                                continue;
+                            }
+                            KeyCode::Char('2') => {
+                                app.drilldown_set_tab(DrilldownTab::Env);
+                                continue;
+                            }
+                            KeyCode::Char('3') => {
+                                app.drilldown_set_tab(DrilldownTab::Files);
+                                continue;
+                            }
+                            KeyCode::Char('4') => {
+                                app.drilldown_set_tab(DrilldownTab::Sockets);
+                                continue;
+                            }
+                            KeyCode::Char('5') => {
+                                app.drilldown_set_tab(DrilldownTab::Tree);
+                                continue;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                app.drilldown_scroll_by(1);
+                                continue;
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                app.drilldown_scroll_by(-1);
+                                continue;
+                            }
+                            KeyCode::PageDown => {
+                                app.drilldown_scroll_by(10);
+                                continue;
+                            }
+                            KeyCode::PageUp => {
+                                app.drilldown_scroll_by(-10);
+                                continue;
+                            }
+                            KeyCode::Char('K') => {
+                                app.kill_selected();
+                                continue;
+                            }
+                            _ => {
+                                continue;
+                            }
+                        }
+                    }
+
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Esc => {
-                            if app.drilldown_pid.is_some() {
-                                app.close_drilldown();
-                            } else if app.show_help {
+                            if app.show_help {
                                 app.show_help = false;
                             } else if !app.search_query.is_empty() {
                                 app.exit_search_cancel();
@@ -152,6 +218,7 @@ async fn main() -> Result<()> {
                         KeyCode::Enter => {
                             if let Some(pid) = app.selected_pid() {
                                 app.open_drilldown(pid);
+                                app.ensure_drilldown_loaded_for_tab();
                             }
                         }
                         KeyCode::Char('j') | KeyCode::Down => app.nav_down(),
@@ -266,7 +333,10 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                                     app.collapsed.insert(label);
                                 }
                             }
-                            Selection::Process(_, pid) => app.open_drilldown(pid),
+                            Selection::Process(_, pid) => {
+                                app.open_drilldown(pid);
+                                app.ensure_drilldown_loaded_for_tab();
+                            }
                             Selection::All => {}
                         }
                     }
@@ -300,6 +370,7 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                     app.pane = Pane::Processes;
                     if was_same {
                         app.open_drilldown(pid);
+                        app.ensure_drilldown_loaded_for_tab();
                     }
                     return;
                 }
@@ -317,6 +388,7 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                     if was_same {
                         if let Some(pid) = app.recommendations.get(idx).and_then(|r| r.pid) {
                             app.open_drilldown(pid);
+                            app.ensure_drilldown_loaded_for_tab();
                         }
                     }
                     return;
