@@ -1,7 +1,7 @@
 mod chart;
 mod processes;
 mod recommendations;
-mod sidebar;
+pub mod sidebar;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

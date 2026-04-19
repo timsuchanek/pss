@@ -22,7 +22,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
 
-use crate::app::{App, AppEvent, ResizeTarget, SortKey};
+use crate::app::{App, AppEvent, ResizeTarget, SidebarSortKey, SortKey};
 use crate::collector::Collector;
 use crate::llm::LlmClient;
 
@@ -131,8 +131,20 @@ async fn main() -> Result<()> {
                         KeyCode::Char('l') | KeyCode::Right => app.expand(),
                         KeyCode::Tab => app.cycle_pane(),
                         KeyCode::Char('K') => app.kill_selected(),
-                        KeyCode::Char('c') => app.set_sort(SortKey::Cpu),
-                        KeyCode::Char('m') => app.set_sort(SortKey::Mem),
+                        KeyCode::Char('c') => {
+                            if app.pane == crate::app::Pane::Sidebar {
+                                app.sidebar_toggle_sort(SidebarSortKey::Cpu);
+                            } else {
+                                app.set_sort(SortKey::Cpu);
+                            }
+                        }
+                        KeyCode::Char('m') => {
+                            if app.pane == crate::app::Pane::Sidebar {
+                                app.sidebar_toggle_sort(SidebarSortKey::Mem);
+                            } else {
+                                app.set_sort(SortKey::Mem);
+                            }
+                        }
                         KeyCode::Char('n') => app.set_sort(SortKey::Name),
                         _ => {}
                     }
@@ -157,8 +169,31 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
     let chart_bottom = chart_top + app.chart_height; // first row after chart
     let recs_top = term_h.saturating_sub(footer + app.recs_height);
 
+    // Sidebar header row lives at: body_top (1) + block_top (1) = y 2.
+    let sidebar_header_y = header + 1;
+    let cpu_col_w = crate::ui::sidebar::CPU_COL_W as u16;
+    let mem_col_w = crate::ui::sidebar::MEM_COL_W as u16;
+    let gutter = crate::ui::sidebar::COL_GUTTER as u16;
+    // Right edge of inner area: sidebar_w - 1 (account for block right border).
+    let inner_right = sidebar_w.saturating_sub(1);
+    let mem_right = inner_right;
+    let mem_left = mem_right.saturating_sub(mem_col_w);
+    let cpu_right = mem_left.saturating_sub(gutter);
+    let cpu_left = cpu_right.saturating_sub(cpu_col_w);
+
     match ev.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // Sidebar header clicks: sort by cpu / mem.
+            if ev.row == sidebar_header_y && ev.column < sidebar_w {
+                if ev.column >= cpu_left && ev.column < cpu_right {
+                    app.sidebar_toggle_sort(SidebarSortKey::Cpu);
+                    return;
+                }
+                if ev.column >= mem_left && ev.column < mem_right {
+                    app.sidebar_toggle_sort(SidebarSortKey::Mem);
+                    return;
+                }
+            }
             // Vertical border between sidebar and right pane?
             if ev.column == sidebar_w && ev.row >= header && ev.row < term_h - footer {
                 app.begin_resize(ResizeTarget::SidebarWidth);

@@ -78,6 +78,33 @@ impl SortKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarSortKey {
+    Cpu,
+    Mem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortDir {
+    Asc,
+    Desc,
+}
+
+impl SortDir {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            SortDir::Asc => "▲",
+            SortDir::Desc => "▼",
+        }
+    }
+    pub fn flipped(self) -> Self {
+        match self {
+            SortDir::Asc => SortDir::Desc,
+            SortDir::Desc => SortDir::Asc,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecsSource {
     Local,
@@ -118,6 +145,8 @@ pub struct App {
     pub last_digest_hash: u64,
     pub selected_rec: usize,
     pub sort: SortKey,
+    pub sidebar_sort_key: SidebarSortKey,
+    pub sidebar_sort_dir: SortDir,
     pub show_help: bool,
     // resizable layout
     pub sidebar_width: u16,
@@ -142,6 +171,8 @@ impl App {
             last_digest_hash: 0,
             selected_rec: 0,
             sort: SortKey::default(),
+            sidebar_sort_key: SidebarSortKey::Cpu,
+            sidebar_sort_dir: SortDir::Desc,
             show_help: false,
             sidebar_width: 54,
             chart_height: 18,
@@ -152,6 +183,16 @@ impl App {
 
     pub fn set_sort(&mut self, s: SortKey) {
         self.sort = s;
+    }
+
+    pub fn sidebar_toggle_sort(&mut self, key: SidebarSortKey) {
+        if self.sidebar_sort_key == key {
+            self.sidebar_sort_dir = self.sidebar_sort_dir.flipped();
+        } else {
+            self.sidebar_sort_key = key;
+            self.sidebar_sort_dir = SortDir::Desc;
+        }
+        sort_buckets(&mut self.buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
     }
 
     pub fn toggle_help(&mut self) {
@@ -191,7 +232,7 @@ impl App {
             entry.pids.push(p.pid);
         }
         let mut buckets: Vec<_> = map.into_values().collect();
-        buckets.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
+        sort_buckets(&mut buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
         self.buckets = buckets;
         // if selection references a bucket that vanished, fall back to All
         if let Selection::Bucket(label) | Selection::Process(label, _) = &self.selection.clone() {
@@ -530,6 +571,20 @@ impl App {
             self.selected_rec = self.recommendations.len().saturating_sub(1);
         }
     }
+}
+
+fn sort_buckets(buckets: &mut [Bucket], key: SidebarSortKey, dir: SortDir) {
+    use std::cmp::Ordering;
+    buckets.sort_by(|a, b| {
+        let base = match key {
+            SidebarSortKey::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
+            SidebarSortKey::Mem => a.mem.cmp(&b.mem),
+        };
+        match dir {
+            SortDir::Asc => base,
+            SortDir::Desc => base.reverse(),
+        }
+    });
 }
 
 fn kill_pid(pid: u32) {
