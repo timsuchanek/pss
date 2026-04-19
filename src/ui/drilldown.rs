@@ -98,9 +98,11 @@ fn body_facts(p: &ProcSample, app: &App, width: usize) -> Vec<Line<'static>> {
     }
     out.push(Line::from(""));
 
-    // Resource sparklines
+    // Resource sparklines — fixed-width so the "now/peak" text lines up
+    // and we never wrap into the next row.
     out.push(section("resources (last 60s)"));
-    let spark_w = width.saturating_sub(30).max(10);
+    const SPARK_W: usize = 30;
+    let spark_w = SPARK_W.min(width.saturating_sub(40).max(8));
     let cpu_hist = app.pid_cpu_history(p.pid, spark_w);
     let mem_hist = app.pid_mem_history(p.pid, spark_w);
     let cpu_peak = cpu_hist.iter().copied().fold(0.0f32, f32::max);
@@ -109,19 +111,25 @@ fn body_facts(p: &ProcSample, app: &App, width: usize) -> Vec<Line<'static>> {
     out.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("cpu  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(spark(&cpu_hist, spark_w), Style::default().fg(Color::Cyan)),
         Span::styled(
-            format!("  now {:>5.1}%   peak {:>5.1}%", p.cpu, cpu_peak),
+            pad_right(&spark(&cpu_hist, spark_w), spark_w),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("   now {:>5.1}%   peak {:>5.1}%", p.cpu, cpu_peak),
             Style::default().fg(Color::Gray),
         ),
     ]));
     out.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("mem  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(spark(&mem_hist, spark_w), Style::default().fg(Color::LightMagenta)),
+        Span::styled(
+            pad_right(&spark(&mem_hist, spark_w), spark_w),
+            Style::default().fg(Color::LightMagenta),
+        ),
         Span::styled(
             format!(
-                "  rss {}   peak {}",
+                "   rss {}   peak {}",
                 fmt_bytes(p.mem),
                 fmt_mb(mem_peak_mb)
             ),
@@ -471,17 +479,14 @@ fn note(msg: &str) -> Line<'static> {
 
 fn spark(values: &[f32], width: usize) -> String {
     const BARS: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    if width == 0 {
+    if width == 0 || values.is_empty() {
         return String::new();
     }
-    let mut out = String::with_capacity(width);
-    let pad = width.saturating_sub(values.len());
-    for _ in 0..pad {
-        out.push(' ');
-    }
-    let local_max = values.iter().copied().fold(0.0f32, f32::max).max(1.0);
     let offset = values.len().saturating_sub(width);
-    for v in &values[offset..] {
+    let visible = &values[offset..];
+    let local_max = visible.iter().copied().fold(0.0f32, f32::max).max(1.0);
+    let mut out = String::with_capacity(visible.len());
+    for v in visible {
         let n = (v.max(0.0) / local_max * (BARS.len() - 1) as f32).round() as usize;
         out.push(BARS[n.min(BARS.len() - 1)]);
     }
