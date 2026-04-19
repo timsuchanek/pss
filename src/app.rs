@@ -158,6 +158,8 @@ pub struct App {
     pub search_query: String,
     pub fuzzy_pids: Option<HashSet<u32>>,
     pub fuzzy_bucket_labels: Option<HashSet<String>>,
+    // drill-down modal
+    pub drilldown_pid: Option<u32>,
 }
 
 impl App {
@@ -187,7 +189,70 @@ impl App {
             search_query: String::new(),
             fuzzy_pids: None,
             fuzzy_bucket_labels: None,
+            drilldown_pid: None,
         }
+    }
+
+    pub fn open_drilldown(&mut self, pid: u32) {
+        self.drilldown_pid = Some(pid);
+    }
+
+    pub fn close_drilldown(&mut self) {
+        self.drilldown_pid = None;
+    }
+
+    pub fn drilldown_proc(&self) -> Option<&ProcSample> {
+        let pid = self.drilldown_pid?;
+        self.history.latest()?.procs.iter().find(|p| p.pid == pid)
+    }
+
+    pub fn process_by_pid(&self, pid: u32) -> Option<&ProcSample> {
+        self.history.latest()?.procs.iter().find(|p| p.pid == pid)
+    }
+
+    /// CPU sparkline sample values (most recent first is the tail).
+    pub fn pid_cpu_history(&self, pid: u32, width: usize) -> Vec<f32> {
+        self.metric_history(pid, width, |p| p.cpu)
+    }
+
+    /// Memory (RSS bytes → MB as f32).
+    pub fn pid_mem_history(&self, pid: u32, width: usize) -> Vec<f32> {
+        self.metric_history(pid, width, |p| p.mem as f32 / 1024.0 / 1024.0)
+    }
+
+    fn metric_history<F>(&self, pid: u32, width: usize, f: F) -> Vec<f32>
+    where
+        F: Fn(&ProcSample) -> f32,
+    {
+        let buf = &self.history.buf;
+        let take_n = width.min(buf.len());
+        let skip = buf.len() - take_n;
+        let mut v = Vec::with_capacity(take_n);
+        for snap in buf.iter().skip(skip) {
+            let val = snap
+                .procs
+                .iter()
+                .find(|p| p.pid == pid)
+                .map(&f)
+                .unwrap_or(0.0);
+            v.push(val);
+        }
+        v
+    }
+
+    pub fn children_of(&self, pid: u32) -> Vec<&ProcSample> {
+        let Some(latest) = self.history.latest() else {
+            return Vec::new();
+        };
+        let mut v: Vec<&ProcSample> = latest
+            .procs
+            .iter()
+            .filter(|p| p.ppid == Some(pid))
+            .collect();
+        v.sort_by(|a, b| {
+            b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        v
     }
 
     // --- Search ---

@@ -13,9 +13,15 @@ pub struct ProcSample {
     pub cmd: String,
     pub cpu: f32,
     pub mem: u64,
+    pub virt: u64,
     pub cwd: Option<PathBuf>,
     pub exe: Option<PathBuf>,
-    pub started_at: u64, // unix seconds
+    pub started_at: u64,        // unix seconds
+    pub run_time_secs: u64,
+    pub status: String,
+    pub uid: Option<u32>,
+    pub io_read: u64,           // total bytes read
+    pub io_write: u64,          // total bytes written
 }
 
 #[derive(Clone, Debug, Default)]
@@ -72,9 +78,15 @@ impl Collector {
                     .join(" "),
                 cpu,
                 mem: p.memory(),
+                virt: p.virtual_memory(),
                 cwd: p.cwd().map(Path::to_path_buf),
                 exe: p.exe().map(Path::to_path_buf),
                 started_at: p.start_time(),
+                run_time_secs: p.run_time(),
+                status: format!("{:?}", p.status()),
+                uid: p.user_id().map(|u| **u),
+                io_read: p.disk_usage().total_read_bytes,
+                io_write: p.disk_usage().total_written_bytes,
             });
         }
 

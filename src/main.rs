@@ -22,7 +22,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
 
-use crate::app::{App, AppEvent, ResizeTarget, SidebarSortKey, SortKey};
+use crate::app::{App, AppEvent, Pane, ResizeTarget, Selection, SidebarSortKey, SortKey};
 use crate::collector::Collector;
 use crate::llm::LlmClient;
 
@@ -137,7 +137,9 @@ async fn main() -> Result<()> {
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Esc => {
-                            if app.show_help {
+                            if app.drilldown_pid.is_some() {
+                                app.close_drilldown();
+                            } else if app.show_help {
                                 app.show_help = false;
                             } else if !app.search_query.is_empty() {
                                 app.exit_search_cancel();
@@ -147,6 +149,11 @@ async fn main() -> Result<()> {
                         }
                         KeyCode::Char('/') => app.enter_search(),
                         KeyCode::Char('?') => app.toggle_help(),
+                        KeyCode::Enter => {
+                            if let Some(pid) = app.selected_pid() {
+                                app.open_drilldown(pid);
+                            }
+                        }
                         KeyCode::Char('j') | KeyCode::Down => app.nav_down(),
                         KeyCode::Char('k') | KeyCode::Up => app.nav_up(),
                         KeyCode::Char('h') | KeyCode::Left => app.collapse(),
@@ -183,16 +190,35 @@ async fn main() -> Result<()> {
 
 fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
     // Layout geometry — must match ui::mod::render_body.
-    // Header occupies row 0; footer occupies last row.
     let sidebar_w = app.sidebar_width;
     let header = 1u16;
     let footer = 1u16;
-    let chart_top = header;
+    let search_h: u16 = if app.search_active || !app.search_query.is_empty() {
+        1
+    } else {
+        0
+    };
+    let body_top = header + search_h;
+    let chart_top = body_top;
     let chart_bottom = chart_top + app.chart_height; // first row after chart
     let recs_top = term_h.saturating_sub(footer + app.recs_height);
 
-    // Sidebar header row lives at: body_top (1) + block_top (1) = y 2.
-    let sidebar_header_y = header + 1;
+    // Sidebar rows: block top border at body_top, header row at body_top+1,
+    // list rows start at body_top+2.
+    let sidebar_list_top = body_top + 2;
+
+    // Process table: block top border at chart_bottom, header row at chart_bottom+1,
+    // data rows start at chart_bottom+2. Data ends at recs_top - detail(2) - 1.
+    let processes_list_top = chart_bottom + 2;
+    let detail_h: u16 = 2;
+    let processes_list_end = recs_top.saturating_sub(detail_h); // exclusive
+
+    // Recs block: top border at recs_top, data rows start at recs_top + 1.
+    let recs_list_top = recs_top + 1;
+    let recs_list_end = term_h.saturating_sub(footer); // exclusive
+
+    // Sidebar header row lives at: body_top + block_top(1).
+    let sidebar_header_y = body_top + 1;
     let cpu_col_w = crate::ui::sidebar::CPU_COL_W as u16;
     let mem_col_w = crate::ui::sidebar::MEM_COL_W as u16;
     let gutter = crate::ui::sidebar::COL_GUTTER as u16;
@@ -205,6 +231,12 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
 
     match ev.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // Close the drill-down modal if the user clicks outside it.
+            if app.drilldown_pid.is_some() {
+                app.close_drilldown();
+                return;
+            }
+
             // Sidebar header clicks: sort by cpu / mem.
             if ev.row == sidebar_header_y && ev.column < sidebar_w {
                 if ev.column >= cpu_left && ev.column < cpu_right {
@@ -213,6 +245,80 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                 }
                 if ev.column >= mem_left && ev.column < mem_right {
                     app.sidebar_toggle_sort(SidebarSortKey::Mem);
+                    return;
+                }
+            }
+            // Sidebar tree row click.
+            if ev.column < sidebar_w && ev.row >= sidebar_list_top && ev.row < term_h - footer {
+                let idx = (ev.row - sidebar_list_top) as usize;
+                let rows = app.tree_rows();
+                if let Some(row) = rows.get(idx) {
+                    let was_same = row.selection == app.selection;
+                    app.selection = row.selection.clone();
+                    app.pane = Pane::Sidebar;
+                    // second click on same row: expand/collapse or drill into process
+                    if was_same {
+                        match row.selection.clone() {
+                            Selection::Bucket(label) => {
+                                if app.collapsed.contains(&label) {
+                                    app.collapsed.remove(&label);
+                                } else {
+                                    app.collapsed.insert(label);
+                                }
+                            }
+                            Selection::Process(_, pid) => app.open_drilldown(pid),
+                            Selection::All => {}
+                        }
+                    }
+                    return;
+                }
+            }
+            // Process table row click.
+            if ev.column > sidebar_w
+                && ev.row >= processes_list_top
+                && ev.row < processes_list_end
+            {
+                let idx = (ev.row - processes_list_top) as usize;
+                let picked_pid: Option<u32> = {
+                    let procs = app.procs_in_selected();
+                    procs.get(idx).map(|p| p.pid)
+                };
+                if let Some(pid) = picked_pid {
+                    let was_same = Some(pid) == app.selected_pid();
+                    let bucket_label: Option<String> = app
+                        .selected_bucket_ref()
+                        .map(|b| b.key.label())
+                        .or_else(|| {
+                            app.buckets
+                                .iter()
+                                .find(|b| b.pids.contains(&pid))
+                                .map(|b| b.key.label())
+                        });
+                    if let Some(lab) = bucket_label {
+                        app.selection = Selection::Process(lab, pid);
+                    }
+                    app.pane = Pane::Processes;
+                    if was_same {
+                        app.open_drilldown(pid);
+                    }
+                    return;
+                }
+            }
+            // Recommendations row click.
+            if ev.column > sidebar_w
+                && ev.row >= recs_list_top
+                && ev.row < recs_list_end
+            {
+                let idx = (ev.row - recs_list_top) as usize;
+                if idx < app.recommendations.len() {
+                    let was_same = app.selected_rec == idx && app.pane == Pane::Recommendations;
+                    app.selected_rec = idx;
+                    app.pane = Pane::Recommendations;
+                    if was_same {
+                        if let Some(pid) = app.recommendations.get(idx).and_then(|r| r.pid) {
+                            app.open_drilldown(pid);
+                        }
+                    }
                     return;
                 }
             }
@@ -226,7 +332,7 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                 app.begin_resize(ResizeTarget::ChartHeight);
                 return;
             }
-            // Horizontal border: detail / recs (recs top minus 0 = recs block border)
+            // Horizontal border: detail / recs
             if ev.row == recs_top && ev.column > sidebar_w {
                 app.begin_resize(ResizeTarget::RecsHeight);
                 return;

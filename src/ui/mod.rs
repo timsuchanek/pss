@@ -1,4 +1,5 @@
 mod chart;
+mod drilldown;
 mod processes;
 mod recommendations;
 pub mod sidebar;
@@ -38,6 +39,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     if app.show_help {
         render_help(f, size);
+    }
+    if app.drilldown_pid.is_some() {
+        drilldown::render(f, size, app);
     }
 }
 
