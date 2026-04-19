@@ -238,15 +238,13 @@ impl App {
         let mut pids: HashSet<u32> = HashSet::new();
         if let Some(latest) = self.history.latest() {
             for p in &latest.procs {
-                let cwd_s = p
-                    .cwd
-                    .as_ref()
-                    .map(|c| c.display().to_string())
-                    .unwrap_or_default();
-                let haystack = format!("{} {} {}", p.name, p.cmd, cwd_s);
+                // Match only the process name — i.e. the text visible in the
+                // sidebar row. Matching against cmd/cwd made fuzzy hits fire
+                // on unrelated processes whose paths happened to contain the
+                // query's letters.
                 let mut buf = Vec::new();
                 if pattern
-                    .score(Utf32Str::new(&haystack, &mut buf), &mut matcher)
+                    .score(Utf32Str::new(&p.name, &mut buf), &mut matcher)
                     .is_some()
                 {
                     pids.insert(p.pid);
