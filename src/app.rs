@@ -109,7 +109,7 @@ pub struct App {
     pub history: History,
     pub buckets: Vec<Bucket>,
     pub selection: Selection,
-    pub expanded: HashSet<String>,     // bucket labels that are expanded
+    pub collapsed: HashSet<String>,    // bucket labels the user has explicitly collapsed
     pub pane: Pane,
     pub recommendations: Vec<Recommendation>,
     pub recs_source: RecsSource,
@@ -133,7 +133,7 @@ impl App {
             history: History::new(),
             buckets: Vec::new(),
             selection: Selection::All,
-            expanded: HashSet::new(),
+            collapsed: HashSet::new(),
             pane: Pane::Sidebar,
             recommendations: Vec::new(),
             recs_source: RecsSource::Local,
@@ -143,7 +143,7 @@ impl App {
             selected_rec: 0,
             sort: SortKey::default(),
             show_help: false,
-            sidebar_width: 34,
+            sidebar_width: 54,
             chart_height: 18,
             recs_height: 8,
             resize_target: None,
@@ -332,11 +332,11 @@ impl App {
     pub fn expand(&mut self) {
         match self.pane {
             Pane::Sidebar => {
-                // If the current selection is a bucket that's collapsed, expand it.
-                // If it's already expanded or a process, move focus to the processes pane.
+                // If the current selection is a bucket that's collapsed, re-open it.
+                // Otherwise move focus to the processes pane.
                 if let Selection::Bucket(label) = &self.selection.clone() {
-                    if !self.expanded.contains(label) {
-                        self.expanded.insert(label.clone());
+                    if self.collapsed.contains(label) {
+                        self.collapsed.remove(label);
                         return;
                     }
                 }
@@ -350,13 +350,13 @@ impl App {
         match self.pane {
             Pane::Sidebar => {
                 // If on a process, jump up to its bucket.
-                // If on a bucket that's expanded, collapse it.
+                // If on an open bucket, collapse it.
                 match self.selection.clone() {
                     Selection::Process(label, _) => {
                         self.selection = Selection::Bucket(label);
                     }
                     Selection::Bucket(label) => {
-                        self.expanded.remove(&label);
+                        self.collapsed.insert(label);
                     }
                     Selection::All => {}
                 }
@@ -394,7 +394,7 @@ impl App {
         });
         for bucket in &self.buckets {
             let label = bucket.key.label();
-            let expanded = self.expanded.contains(&label);
+            let expanded = !self.collapsed.contains(&label);
             out.push(TreeRow {
                 depth: 0,
                 label: label.clone(),
