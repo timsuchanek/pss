@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::collector::{Collector, History, ProcSample, Snapshot};
@@ -164,6 +166,37 @@ pub struct App {
     pub drilldown_tab: DrilldownTab,
     pub drilldown_details: Option<Details>,
     pub drilldown_scroll: u16,
+    // filter toggles
+    pub hide_kernel: bool,
+    pub only_my_uid: bool,
+    pub hide_self: bool,
+    pub my_uid: Option<u32>,
+    pub self_pid: u32,
+    // sampling controls — shared with the sampler task via atomics
+    pub sampler: Arc<SamplerCtl>,
+    // kill signal menu
+    pub kill_menu: Option<KillMenu>,
+}
+
+#[derive(Clone, Debug)]
+pub struct KillMenu {
+    pub pid: u32,
+    pub name: String,
+}
+
+#[derive(Debug)]
+pub struct SamplerCtl {
+    pub paused: AtomicBool,
+    pub interval_ms: AtomicU64,
+}
+
+impl SamplerCtl {
+    pub fn new(interval_ms: u64) -> Self {
+        Self {
+            paused: AtomicBool::new(false),
+            interval_ms: AtomicU64::new(interval_ms),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +228,73 @@ impl DrilldownTab {
 }
 
 impl App {
+    pub fn apply_config(&mut self, cfg: &crate::config::Config) {
+        self.sidebar_width = cfg.ui.sidebar_width;
+        self.chart_height = cfg.ui.chart_height;
+        self.recs_height = cfg.ui.recs_height;
+
+        self.sidebar_sort_key = match cfg.sort.sidebar_key.as_str() {
+            "mem" => SidebarSortKey::Mem,
+            _ => SidebarSortKey::Cpu,
+        };
+        self.sidebar_sort_dir = match cfg.sort.sidebar_dir.as_str() {
+            "asc" => SortDir::Asc,
+            _ => SortDir::Desc,
+        };
+        self.sort = match cfg.sort.processes.as_str() {
+            "mem" => SortKey::Mem,
+            "name" => SortKey::Name,
+            _ => SortKey::Cpu,
+        };
+
+        self.hide_kernel = cfg.filters.hide_kernel;
+        self.only_my_uid = cfg.filters.only_my_uid;
+        self.hide_self = cfg.filters.hide_self;
+
+        self.sampler
+            .interval_ms
+            .store(cfg.sampling.interval_ms.max(100), Ordering::Relaxed);
+
+        self.collapsed = cfg.state.collapsed.iter().cloned().collect();
+    }
+
+    pub fn to_config_patch(&self, base: &crate::config::Config) -> crate::config::Config {
+        use crate::config::*;
+        let mut out = base.clone();
+        out.ui = UiConfig {
+            sidebar_width: self.sidebar_width,
+            chart_height: self.chart_height,
+            recs_height: self.recs_height,
+        };
+        out.sort = SortConfig {
+            sidebar_key: match self.sidebar_sort_key {
+                SidebarSortKey::Cpu => "cpu".into(),
+                SidebarSortKey::Mem => "mem".into(),
+            },
+            sidebar_dir: match self.sidebar_sort_dir {
+                SortDir::Asc => "asc".into(),
+                SortDir::Desc => "desc".into(),
+            },
+            processes: match self.sort {
+                SortKey::Cpu => "cpu".into(),
+                SortKey::Mem => "mem".into(),
+                SortKey::Name => "name".into(),
+            },
+        };
+        out.filters = FiltersConfig {
+            hide_kernel: self.hide_kernel,
+            only_my_uid: self.only_my_uid,
+            hide_self: self.hide_self,
+        };
+        out.sampling = SamplingConfig {
+            interval_ms: self.sample_interval_ms(),
+        };
+        let mut collapsed: Vec<String> = self.collapsed.iter().cloned().collect();
+        collapsed.sort();
+        out.state = StateConfig { collapsed };
+        out
+    }
+
     pub fn new() -> Self {
         Self {
             collector: Collector::new(),
@@ -225,7 +325,109 @@ impl App {
             drilldown_tab: DrilldownTab::Facts,
             drilldown_details: None,
             drilldown_scroll: 0,
+            hide_kernel: true,
+            only_my_uid: false,
+            hide_self: true,
+            my_uid: current_uid(),
+            self_pid: std::process::id(),
+            sampler: Arc::new(SamplerCtl::new(1000)),
+            kill_menu: None,
         }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.sampler.paused.load(Ordering::Relaxed)
+    }
+    pub fn sample_interval_ms(&self) -> u64 {
+        self.sampler.interval_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn toggle_hide_kernel(&mut self) {
+        self.hide_kernel = !self.hide_kernel;
+    }
+    pub fn toggle_only_my_uid(&mut self) {
+        self.only_my_uid = !self.only_my_uid;
+    }
+    pub fn toggle_hide_self(&mut self) {
+        self.hide_self = !self.hide_self;
+    }
+
+    pub fn toggle_paused(&mut self) {
+        let cur = self.sampler.paused.load(Ordering::Relaxed);
+        self.sampler.paused.store(!cur, Ordering::Relaxed);
+    }
+    pub fn sampling_faster(&mut self) {
+        let cur = self.sampler.interval_ms.load(Ordering::Relaxed);
+        let next = cur.saturating_sub(250).max(250);
+        self.sampler.interval_ms.store(next, Ordering::Relaxed);
+    }
+    pub fn sampling_slower(&mut self) {
+        let cur = self.sampler.interval_ms.load(Ordering::Relaxed);
+        let next = (cur + 250).min(5000);
+        self.sampler.interval_ms.store(next, Ordering::Relaxed);
+    }
+
+    pub fn open_kill_menu(&mut self) {
+        let (pid, name) = match self.pane {
+            Pane::Processes | Pane::Sidebar => {
+                if let Some(pid) = self.selected_pid() {
+                    let name = self
+                        .process_by_pid(pid)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    (Some(pid), name)
+                } else {
+                    (None, String::new())
+                }
+            }
+            Pane::Recommendations => {
+                let rec = self.recommendations.get(self.selected_rec);
+                let pid = rec.and_then(|r| r.pid);
+                let name = rec.map(|r| r.target.clone()).unwrap_or_default();
+                (pid, name)
+            }
+        };
+        // In the drill-down, prefer the drill-down target.
+        let (pid, name) = if let Some(dp) = self.drilldown_pid {
+            let name = self
+                .process_by_pid(dp)
+                .map(|p| p.name.clone())
+                .unwrap_or(name);
+            (Some(dp), name)
+        } else {
+            (pid, name)
+        };
+        if let Some(pid) = pid {
+            self.kill_menu = Some(KillMenu { pid, name });
+        }
+    }
+
+    pub fn close_kill_menu(&mut self) {
+        self.kill_menu = None;
+    }
+
+    pub fn kill_with_signal(&mut self, sig: sysinfo::Signal) {
+        if let Some(m) = self.kill_menu.clone() {
+            kill_pid_signal(m.pid, sig);
+        }
+        self.kill_menu = None;
+    }
+
+    pub fn proc_passes_filters(&self, p: &ProcSample) -> bool {
+        if self.hide_self && p.pid == self.self_pid {
+            return false;
+        }
+        if self.only_my_uid {
+            if let (Some(mine), Some(his)) = (self.my_uid, p.uid) {
+                if mine != his {
+                    return false;
+                }
+            }
+        }
+        if self.hide_kernel && is_kernelish(p) {
+            return false;
+        }
+        true
     }
 
     pub fn open_drilldown(&mut self, pid: u32) {
@@ -534,6 +736,9 @@ impl App {
     fn rebucket(&mut self, snap: &Snapshot) {
         let mut map: BTreeMap<BucketKey, Bucket> = BTreeMap::new();
         for p in &snap.procs {
+            if !self.proc_passes_filters(p) {
+                continue;
+            }
             let key = self.bucket_for(p);
             let entry = map.entry(key.clone()).or_insert_with(|| Bucket {
                 key,
@@ -619,7 +824,7 @@ impl App {
             Selection::All => latest
                 .procs
                 .iter()
-                .filter(|p| self.pid_visible(p.pid))
+                .filter(|p| self.proc_passes_filters(p) && self.pid_visible(p.pid))
                 .collect(),
             Selection::Bucket(label) | Selection::Process(label, _) => {
                 let Some(bucket) = self.buckets.iter().find(|b| b.key.label() == *label) else {
@@ -917,10 +1122,32 @@ fn sort_buckets(buckets: &mut [Bucket], key: SidebarSortKey, dir: SortDir) {
 }
 
 fn kill_pid(pid: u32) {
-    use sysinfo::{Pid, ProcessesToUpdate, Signal};
+    kill_pid_signal(pid, sysinfo::Signal::Term);
+}
+
+fn kill_pid_signal(pid: u32, sig: sysinfo::Signal) {
+    use sysinfo::{Pid, ProcessesToUpdate};
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
     if let Some(proc) = sys.process(Pid::from_u32(pid)) {
-        proc.kill_with(Signal::Term);
+        proc.kill_with(sig);
     }
+}
+
+fn current_uid() -> Option<u32> {
+    #[cfg(unix)]
+    unsafe {
+        Some(libc::getuid() as u32)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn is_kernelish(p: &ProcSample) -> bool {
+    // Heuristic across platforms: kernel / system-ish processes tend to have
+    // no cwd, no exe, and (often) uid 0. Keep conservative so regular root
+    // processes with real cwds still show.
+    p.cwd.is_none() && p.exe.is_none() && p.uid == Some(0)
 }

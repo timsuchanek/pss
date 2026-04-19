@@ -43,6 +43,78 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.drilldown_pid.is_some() {
         drilldown::render(f, size, app);
     }
+    if app.kill_menu.is_some() {
+        render_kill_menu(f, size, app);
+    }
+}
+
+fn render_kill_menu(f: &mut Frame, area: Rect, app: &App) {
+    let Some(menu) = app.kill_menu.as_ref() else {
+        return;
+    };
+    let w = 48u16.min(area.width.saturating_sub(4));
+    let h = 16u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" kill [{}] {}", menu.pid, truncate_label(&menu.name, 28)),
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        signal_row("t", "TERM", "graceful, default"),
+        signal_row("k", "KILL", "forceful, unblockable"),
+        signal_row("h", "HUP", "hangup"),
+        signal_row("i", "INT", "interrupt (^C)"),
+        signal_row("s", "STOP", "pause process"),
+        signal_row("c", "CONT", "resume after STOP"),
+        signal_row("q", "QUIT", "core-dump quit"),
+        signal_row("1", "USR1", "user-defined 1"),
+        signal_row("2", "USR2", "user-defined 2"),
+        Line::from(""),
+        Line::from(Span::styled(
+            " enter sends TERM · esc cancels",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightYellow))
+        .title(Span::styled(
+            " send signal ",
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+fn signal_row(key: &str, sig: &str, note: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("[{}]", key),
+            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<5}", sig),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!(" {}", note),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
+}
+
+fn truncate_label(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", kept)
 }
 
 fn render_search_bar(f: &mut Frame, area: Rect, app: &App) {
@@ -100,9 +172,13 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from("  j / k / ↑ ↓     navigate within pane"),
         Line::from("  h / l / ← →     collapse / expand to right pane"),
         Line::from("  tab             cycle panes"),
-        Line::from("  K                SIGTERM selected process or rec"),
+        Line::from("  enter            drill-down modal on selected process"),
+        Line::from("  K                kill: signal menu (TERM/KILL/HUP/INT/…)"),
         Line::from("  c / m / n        sort procs by cpu / mem / name"),
         Line::from("  /                fuzzy filter (nucleo)"),
+        Line::from("  space            pause sampling"),
+        Line::from("  [  /  ]          faster / slower sampling (250ms step)"),
+        Line::from("  H / U / S        toggle kernel / only-mine / hide-self"),
         Line::from("  esc              clear filter / close overlay / quit"),
         Line::from("  ?                toggle this overlay"),
         Line::from("  q / ^C           quit"),
@@ -180,8 +256,42 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         Span::raw(format!("{}   ", proc_count)),
         Span::styled("recs ", Style::default().fg(Color::DarkGray)),
         Span::styled(src_tag, Style::default().fg(Color::Magenta)),
+        Span::raw("   "),
+        Span::styled(
+            if app.is_paused() { "⏸ paused " } else { "" },
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{}ms", app.sample_interval_ms()),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            filter_badges(app),
+            Style::default().fg(Color::LightMagenta),
+        ),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+fn filter_badges(app: &App) -> String {
+    let mut s = String::new();
+    if app.hide_kernel {
+        s.push_str("[kern-hid]");
+    }
+    if app.only_my_uid {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str("[mine]");
+    }
+    if app.hide_self {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str("[self-hid]");
+    }
+    s
 }
 
 fn num_cpus() -> usize {
@@ -343,7 +453,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let hint = if app.search_active {
         "type to filter · enter commit · esc cancel · ↑↓ nav"
     } else {
-        "j/k nav · h/l pane · tab cycle · K kill · c/m/n sort · / search · ? help · q quit"
+        "j/k nav · enter drill · K kill · / search · space pause · [ ] rate · H/U/S filters · ? help · q quit"
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(

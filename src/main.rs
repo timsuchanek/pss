@@ -22,6 +22,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, interval};
+// `interval` only needed for the recommender ticker below; sampler uses sleep().
 
 use crate::app::{
     App, AppEvent, DrilldownTab, Pane, ResizeTarget, Selection, SidebarSortKey, SortKey,
@@ -38,15 +39,23 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
     // sampler task — prime sysinfo so first real sample has live cpu%
+    let mut app = App::new();
+    app.has_llm = has_llm;
+    app.apply_config(&cfg);
+    let sampler = app.sampler.clone();
     {
         let tx = tx.clone();
         tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
             let mut collector = Collector::new();
             let _ = collector.sample();
             tokio::time::sleep(Duration::from_millis(250)).await;
-            let mut tick = interval(Duration::from_millis(1000));
             loop {
-                tick.tick().await;
+                let interval_ms = sampler.interval_ms.load(Ordering::Relaxed).max(100);
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                if sampler.paused.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let snap = collector.sample();
                 let _ = tx.send(AppEvent::Snapshot(snap));
             }
@@ -72,8 +81,6 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
-    app.has_llm = has_llm;
     let mut last_render = Instant::now();
 
     loop {
@@ -137,6 +144,56 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    // Kill menu hijacks input while open.
+                    if app.kill_menu.is_some() {
+                        use sysinfo::Signal;
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.close_kill_menu();
+                                continue;
+                            }
+                            KeyCode::Enter | KeyCode::Char('t') => {
+                                app.kill_with_signal(Signal::Term);
+                                continue;
+                            }
+                            KeyCode::Char('k') => {
+                                app.kill_with_signal(Signal::Kill);
+                                continue;
+                            }
+                            KeyCode::Char('h') => {
+                                app.kill_with_signal(Signal::Hangup);
+                                continue;
+                            }
+                            KeyCode::Char('i') => {
+                                app.kill_with_signal(Signal::Interrupt);
+                                continue;
+                            }
+                            KeyCode::Char('s') => {
+                                app.kill_with_signal(Signal::Stop);
+                                continue;
+                            }
+                            KeyCode::Char('c') => {
+                                app.kill_with_signal(Signal::Continue);
+                                continue;
+                            }
+                            KeyCode::Char('q') => {
+                                app.kill_with_signal(Signal::Quit);
+                                continue;
+                            }
+                            KeyCode::Char('1') => {
+                                app.kill_with_signal(Signal::User1);
+                                continue;
+                            }
+                            KeyCode::Char('2') => {
+                                app.kill_with_signal(Signal::User2);
+                                continue;
+                            }
+                            _ => {
+                                continue;
+                            }
+                        }
+                    }
+
                     // Drill-down modal hijacks a few keys when it's open.
                     if app.drilldown_pid.is_some() {
                         match key.code {
@@ -193,7 +250,7 @@ async fn main() -> Result<()> {
                                 continue;
                             }
                             KeyCode::Char('K') => {
-                                app.kill_selected();
+                                app.open_kill_menu();
                                 continue;
                             }
                             _ => {
@@ -226,7 +283,13 @@ async fn main() -> Result<()> {
                         KeyCode::Char('h') | KeyCode::Left => app.collapse(),
                         KeyCode::Char('l') | KeyCode::Right => app.expand(),
                         KeyCode::Tab => app.cycle_pane(),
-                        KeyCode::Char('K') => app.kill_selected(),
+                        KeyCode::Char('K') => app.open_kill_menu(),
+                        KeyCode::Char(' ') => app.toggle_paused(),
+                        KeyCode::Char('[') => app.sampling_faster(),
+                        KeyCode::Char(']') => app.sampling_slower(),
+                        KeyCode::Char('H') => app.toggle_hide_kernel(),
+                        KeyCode::Char('U') => app.toggle_only_my_uid(),
+                        KeyCode::Char('S') => app.toggle_hide_self(),
                         KeyCode::Char('c') => {
                             if app.pane == crate::app::Pane::Sidebar {
                                 app.sidebar_toggle_sort(SidebarSortKey::Cpu);
@@ -252,6 +315,9 @@ async fn main() -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
+
+    // Persist UI state (best-effort; swallow errors).
+    let _ = config::save(&app.to_config_patch(&cfg));
     Ok(())
 }
 

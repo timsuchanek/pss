@@ -16,6 +16,8 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 directories = "5"
 nucleo-matcher = "0.3"
+toml = "0.8"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"
