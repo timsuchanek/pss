@@ -8,6 +8,7 @@ use crate::collector::{Collector, History, ProcSample, Snapshot};
 use crate::details::{self, Details};
 use crate::heuristics;
 use crate::llm::{LlmDigest, Recommendation};
+use crate::netmon::NetRates;
 use crate::thermal::ThermalSnapshot;
 
 const LLM_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
@@ -18,6 +19,7 @@ pub enum AppEvent {
     RequestRecommendations,
     Recommendations(Vec<Recommendation>),
     Thermal(ThermalSnapshot),
+    Net(NetRates),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -182,6 +184,8 @@ pub struct App {
     pub thermal: Option<ThermalSnapshot>,
     pub show_thermal: bool,
     pub thermal_scroll: u16,
+    // aggregate network rates (macOS getifaddrs)
+    pub net: Option<NetRates>,
 }
 
 #[derive(Clone, Debug)]
@@ -341,11 +345,16 @@ impl App {
             thermal: None,
             show_thermal: false,
             thermal_scroll: 0,
+            net: None,
         }
     }
 
     pub fn set_thermal(&mut self, t: ThermalSnapshot) {
         self.thermal = Some(t);
+    }
+
+    pub fn set_net(&mut self, r: NetRates) {
+        self.net = Some(r);
     }
 
     pub fn toggle_thermal_overlay(&mut self) {

@@ -371,6 +371,18 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw("   "));
         }
     }
+    if let Some(r) = app.net.as_ref() {
+        spans.push(Span::styled("net ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("↑{:>8}  ", fmt_rate(r.tx_bytes_per_sec)),
+            Style::default().fg(rate_color(r.tx_bytes_per_sec)),
+        ));
+        spans.push(Span::styled(
+            format!("↓{:>8}", fmt_rate(r.rx_bytes_per_sec)),
+            Style::default().fg(rate_color(r.rx_bytes_per_sec)),
+        ));
+        spans.push(Span::raw("   "));
+    }
     spans.extend(vec![
         Span::styled("procs ", Style::default().fg(Color::DarkGray)),
         Span::raw(format!("{}   ", proc_count)),
@@ -430,6 +442,34 @@ fn cpu_color(pct: f32) -> Color {
         Color::Yellow
     } else {
         Color::Green
+    }
+}
+
+fn fmt_rate(bps: f64) -> String {
+    let b = bps.max(0.0);
+    if b >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1}G/s", b / 1024.0 / 1024.0 / 1024.0)
+    } else if b >= 1024.0 * 1024.0 {
+        format!("{:.1}M/s", b / 1024.0 / 1024.0)
+    } else if b >= 1024.0 {
+        format!("{:.0}K/s", b / 1024.0)
+    } else {
+        format!("{:.0}B/s", b)
+    }
+}
+
+fn rate_color(bps: f64) -> Color {
+    let mb = bps / 1024.0 / 1024.0;
+    if mb >= 50.0 {
+        Color::Red
+    } else if mb >= 10.0 {
+        Color::LightRed
+    } else if mb >= 1.0 {
+        Color::Yellow
+    } else if mb >= 0.01 {
+        Color::Green
+    } else {
+        Color::DarkGray
     }
 }
 

@@ -4,6 +4,7 @@ mod config;
 mod details;
 mod heuristics;
 mod llm;
+mod netmon;
 mod thermal;
 mod ui;
 
@@ -82,6 +83,26 @@ async fn main() -> Result<()> {
         });
     }
 
+    // net sampler — aggregate rx/tx rates from getifaddrs, 1 Hz.
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let Some(mut mon) = crate::netmon::NetMon::new() else {
+                return;
+            };
+            // Prime so first published sample has a real delta.
+            let _ = mon.sample();
+            loop {
+                std::thread::sleep(Duration::from_millis(1000));
+                if let Some(r) = mon.sample() {
+                    if tx.send(AppEvent::Net(r)).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     // recommender task — only runs when a key is configured
     if has_llm {
         let tx = tx.clone();
@@ -124,6 +145,7 @@ async fn main() -> Result<()> {
                 }
                 AppEvent::Recommendations(r) => app.set_recommendations(r),
                 AppEvent::Thermal(t) => app.set_thermal(t),
+                AppEvent::Net(r) => app.set_net(r),
             }
         }
 
