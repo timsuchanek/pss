@@ -4,6 +4,7 @@ mod config;
 mod details;
 mod heuristics;
 mod llm;
+mod thermal;
 mod ui;
 
 use std::io;
@@ -62,6 +63,25 @@ async fn main() -> Result<()> {
         });
     }
 
+    // thermal sampler — IOHID on macOS, no-op elsewhere. IOHID internally
+    // rate-limits at ~1Hz so faster polling is wasted.
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let Some(reader) = crate::thermal::ThermalReader::new() else {
+                return;
+            };
+            loop {
+                let sensors = reader.read();
+                let snap = crate::thermal::ThermalSnapshot { sensors };
+                if tx.send(AppEvent::Thermal(snap)).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1000));
+            }
+        });
+    }
+
     // recommender task — only runs when a key is configured
     if has_llm {
         let tx = tx.clone();
@@ -103,6 +123,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 AppEvent::Recommendations(r) => app.set_recommendations(r),
+                AppEvent::Thermal(t) => app.set_thermal(t),
             }
         }
 
@@ -142,6 +163,35 @@ async fn main() -> Result<()> {
                             _ => {}
                         }
                         continue;
+                    }
+
+                    // Thermal overlay hijacks input while open.
+                    if app.show_thermal {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => {
+                                app.show_thermal = false;
+                                continue;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                app.thermal_scroll_by(1);
+                                continue;
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                app.thermal_scroll_by(-1);
+                                continue;
+                            }
+                            KeyCode::PageDown => {
+                                app.thermal_scroll_by(10);
+                                continue;
+                            }
+                            KeyCode::PageUp => {
+                                app.thermal_scroll_by(-10);
+                                continue;
+                            }
+                            _ => {
+                                continue;
+                            }
+                        }
                     }
 
                     // Kill menu hijacks input while open.
@@ -305,6 +355,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         KeyCode::Char('n') => app.set_sort(SortKey::Name),
+                        KeyCode::Char('T') => app.toggle_thermal_overlay(),
                         _ => {}
                     }
                 }

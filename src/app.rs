@@ -8,6 +8,7 @@ use crate::collector::{Collector, History, ProcSample, Snapshot};
 use crate::details::{self, Details};
 use crate::heuristics;
 use crate::llm::{LlmDigest, Recommendation};
+use crate::thermal::ThermalSnapshot;
 
 const LLM_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
 
@@ -16,6 +17,7 @@ pub enum AppEvent {
     Snapshot(Snapshot),
     RequestRecommendations,
     Recommendations(Vec<Recommendation>),
+    Thermal(ThermalSnapshot),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -176,6 +178,10 @@ pub struct App {
     pub sampler: Arc<SamplerCtl>,
     // kill signal menu
     pub kill_menu: Option<KillMenu>,
+    // native thermal sensors (macOS IOHID); empty on other platforms
+    pub thermal: Option<ThermalSnapshot>,
+    pub show_thermal: bool,
+    pub thermal_scroll: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -332,7 +338,26 @@ impl App {
             self_pid: std::process::id(),
             sampler: Arc::new(SamplerCtl::new(1000)),
             kill_menu: None,
+            thermal: None,
+            show_thermal: false,
+            thermal_scroll: 0,
         }
+    }
+
+    pub fn set_thermal(&mut self, t: ThermalSnapshot) {
+        self.thermal = Some(t);
+    }
+
+    pub fn toggle_thermal_overlay(&mut self) {
+        self.show_thermal = !self.show_thermal;
+        if self.show_thermal {
+            self.thermal_scroll = 0;
+        }
+    }
+
+    pub fn thermal_scroll_by(&mut self, delta: i32) {
+        let new = (self.thermal_scroll as i32 + delta).max(0) as u16;
+        self.thermal_scroll = new;
     }
 
     pub fn is_paused(&self) -> bool {

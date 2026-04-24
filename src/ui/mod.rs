@@ -46,6 +46,102 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if app.kill_menu.is_some() {
         render_kill_menu(f, size, app);
     }
+    if app.show_thermal {
+        render_thermal_overlay(f, size, app);
+    }
+}
+
+fn render_thermal_overlay(f: &mut Frame, area: Rect, app: &App) {
+    use crate::thermal::SensorKind;
+    let sensors: Vec<_> = app
+        .thermal
+        .as_ref()
+        .map(|t| t.sensors.clone())
+        .unwrap_or_default();
+
+    let w = 60u16.min(area.width.saturating_sub(4));
+    let h = (sensors.len() as u16 + 8).clamp(12, area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if sensors.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no thermal sensors available",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        // Group by kind for readability.
+        let groups: [(SensorKind, &str); 6] = [
+            (SensorKind::Cpu, "cpu"),
+            (SensorKind::Gpu, "gpu"),
+            (SensorKind::Ane, "neural"),
+            (SensorKind::Memory, "memory"),
+            (SensorKind::Battery, "battery"),
+            (SensorKind::Other, "other"),
+        ];
+        for (kind, label) in groups.iter() {
+            let members: Vec<_> = sensors.iter().filter(|s| s.kind == *kind).collect();
+            if members.is_empty() {
+                continue;
+            }
+            lines.push(Line::from(Span::styled(
+                format!(" {}", label),
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for s in members {
+                let name_w = (w as usize).saturating_sub(14);
+                let name = truncate_label(&s.label, name_w);
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        pad_right_s(&name, name_w.saturating_sub(2)),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(
+                        format!("  {:>5.1}°C", s.celsius),
+                        Style::default().fg(temp_color(s.celsius)),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightCyan))
+        .title(Span::styled(
+            " thermal sensors ",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " j/k scroll · esc close ",
+            Style::default().fg(Color::DarkGray),
+        ));
+
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(block).scroll((app.thermal_scroll, 0)),
+        rect,
+    );
+}
+
+fn pad_right_s(s: &str, width: usize) -> String {
+    let c = s.chars().count();
+    if c >= width {
+        return s.to_string();
+    }
+    let mut o = s.to_string();
+    for _ in 0..(width - c) {
+        o.push(' ');
+    }
+    o
 }
 
 fn render_kill_menu(f: &mut Frame, area: Rect, app: &App) {
@@ -179,6 +275,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from("  space            pause sampling"),
         Line::from("  [  /  ]          faster / slower sampling (250ms step)"),
         Line::from("  H / U / S        toggle kernel / only-mine / hide-self"),
+        Line::from("  T                thermal sensor overlay"),
         Line::from("  esc              clear filter / close overlay / quit"),
         Line::from("  ?                toggle this overlay"),
         Line::from("  q / ^C           quit"),
@@ -237,7 +334,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
-    let line = Line::from(vec![
+    let mut spans: Vec<Span> = vec![
         Span::styled(
             " pss ",
             Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD),
@@ -252,6 +349,29 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             " {:>3.0}% ({:.1}/{:.1} GB)   ",
             mem_pct, mem_used_gb, mem_total_gb
         )),
+    ];
+    if let Some(t) = app.thermal.as_ref() {
+        use crate::thermal::SensorKind;
+        let cpu = t.max_of(SensorKind::Cpu);
+        let gpu = t.max_of(SensorKind::Gpu);
+        if cpu.is_some() || gpu.is_some() {
+            spans.push(Span::styled("therm ", Style::default().fg(Color::DarkGray)));
+            if let Some(c) = cpu {
+                spans.push(Span::styled(
+                    format!("cpu {:>4.1}° ", c),
+                    Style::default().fg(temp_color(c)),
+                ));
+            }
+            if let Some(g) = gpu {
+                spans.push(Span::styled(
+                    format!("gpu {:>4.1}°", g),
+                    Style::default().fg(temp_color(g)),
+                ));
+            }
+            spans.push(Span::raw("   "));
+        }
+    }
+    spans.extend(vec![
         Span::styled("procs ", Style::default().fg(Color::DarkGray)),
         Span::raw(format!("{}   ", proc_count)),
         Span::styled("recs ", Style::default().fg(Color::DarkGray)),
@@ -271,6 +391,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::LightMagenta),
         ),
     ]);
+    let line = Line::from(spans);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -306,6 +427,18 @@ fn cpu_color(pct: f32) -> Color {
     } else if pct >= 60.0 {
         Color::LightRed
     } else if pct >= 30.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+fn temp_color(c: f32) -> Color {
+    if c >= 95.0 {
+        Color::Red
+    } else if c >= 80.0 {
+        Color::LightRed
+    } else if c >= 65.0 {
         Color::Yellow
     } else {
         Color::Green
@@ -453,7 +586,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let hint = if app.search_active {
         "type to filter · enter commit · esc cancel · ↑↓ nav"
     } else {
-        "j/k nav · enter drill · K kill · / search · space pause · [ ] rate · H/U/S filters · ? help · q quit"
+        "j/k nav · enter drill · K kill · T therm · / search · space pause · [ ] rate · ? help · q quit"
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
