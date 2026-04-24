@@ -438,10 +438,13 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
     let sidebar_header_y = body_top + 1;
     let cpu_col_w = crate::ui::sidebar::CPU_COL_W as u16;
     let mem_col_w = crate::ui::sidebar::MEM_COL_W as u16;
+    let net_col_w = crate::ui::sidebar::NET_COL_W as u16;
     let gutter = crate::ui::sidebar::COL_GUTTER as u16;
     // Right edge of inner area: sidebar_w - 1 (account for block right border).
     let inner_right = sidebar_w.saturating_sub(1);
-    let mem_right = inner_right;
+    let net_right = inner_right;
+    let net_left = net_right.saturating_sub(net_col_w);
+    let mem_right = net_left.saturating_sub(gutter);
     let mem_left = mem_right.saturating_sub(mem_col_w);
     let cpu_right = mem_left.saturating_sub(gutter);
     let cpu_left = cpu_right.saturating_sub(cpu_col_w);
@@ -462,6 +465,10 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                 }
                 if ev.column >= mem_left && ev.column < mem_right {
                     app.sidebar_toggle_sort(SidebarSortKey::Mem);
+                    return;
+                }
+                if ev.column >= net_left && ev.column < net_right {
+                    app.sidebar_toggle_sort(SidebarSortKey::Net);
                     return;
                 }
             }

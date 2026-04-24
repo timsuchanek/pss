@@ -102,6 +102,9 @@ mod macos {
     use std::io::{BufRead, BufReader};
     use std::process::{Child, Command, Stdio};
 
+    // Keep in sync with the `-s` flag below.
+    const NETTOP_INTERVAL_S: u64 = 2;
+
     /// Streams `nettop -d -x` and invokes `on_sample` with per-PID rates
     /// once per second. The child is killed when the handle is dropped.
     pub struct PerPidSampler {
@@ -122,6 +125,8 @@ mod macos {
         {
             // stdbuf -oL forces line-buffered stdout so we see each sample
             // immediately; without it nettop block-buffers when piped.
+            // -c: "gentle on CPU" · -s 2: 2s sample interval keeps nettop's
+            // CPU cost well under 10% (was >100% with -s 1 on a busy laptop).
             let mut child = Command::new("/usr/bin/stdbuf")
                 .args([
                     "-oL",
@@ -129,10 +134,11 @@ mod macos {
                     "-P",
                     "-x",
                     "-d",
+                    "-c",
                     "-J",
                     "bytes_in,bytes_out",
                     "-s",
-                    "1",
+                    "2",
                     "-L",
                     "0",
                     "-n",
@@ -163,7 +169,11 @@ mod macos {
                     }
                     if let Some((pid, rx, tx)) = parse_row(&line) {
                         if rx != 0 || tx != 0 {
-                            current.insert(pid, (rx, tx));
+                            // Convert per-interval delta → B/s.
+                            current.insert(
+                                pid,
+                                (rx / NETTOP_INTERVAL_S, tx / NETTOP_INTERVAL_S),
+                            );
                         }
                     }
                 }

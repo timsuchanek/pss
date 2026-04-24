@@ -57,6 +57,7 @@ pub struct Bucket {
     pub key: BucketKey,
     pub cpu: f32,
     pub mem: u64,
+    pub net: u64, // rx + tx B/s aggregated across bucket.pids
     pub pids: Vec<u32>,
 }
 
@@ -92,6 +93,7 @@ impl SortKey {
 pub enum SidebarSortKey {
     Cpu,
     Mem,
+    Net,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +252,7 @@ impl App {
 
         self.sidebar_sort_key = match cfg.sort.sidebar_key.as_str() {
             "mem" => SidebarSortKey::Mem,
+            "net" => SidebarSortKey::Net,
             _ => SidebarSortKey::Cpu,
         };
         self.sidebar_sort_dir = match cfg.sort.sidebar_dir.as_str() {
@@ -286,6 +289,7 @@ impl App {
             sidebar_key: match self.sidebar_sort_key {
                 SidebarSortKey::Cpu => "cpu".into(),
                 SidebarSortKey::Mem => "mem".into(),
+                SidebarSortKey::Net => "net".into(),
             },
             sidebar_dir: match self.sidebar_sort_dir {
                 SortDir::Asc => "asc".into(),
@@ -367,6 +371,17 @@ impl App {
 
     pub fn set_per_pid_net(&mut self, r: PerPidRates) {
         self.per_pid_net = r;
+        // Re-compute per-bucket net and re-sort so sidebar reflects the
+        // fresh rates even between process snapshots.
+        for b in self.buckets.iter_mut() {
+            b.net = b
+                .pids
+                .iter()
+                .filter_map(|pid| self.per_pid_net.rates.get(pid))
+                .map(|(rx, tx)| rx + tx)
+                .sum();
+        }
+        sort_buckets(&mut self.buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
     }
 
     pub fn pid_net_rate(&self, pid: u32) -> Option<(u64, u64)> {
@@ -794,6 +809,7 @@ impl App {
                 key,
                 cpu: 0.0,
                 mem: 0,
+                net: 0,
                 pids: Vec::new(),
             });
             entry.cpu += p.cpu;
@@ -801,6 +817,14 @@ impl App {
             entry.pids.push(p.pid);
         }
         let mut buckets: Vec<_> = map.into_values().collect();
+        for b in buckets.iter_mut() {
+            b.net = b
+                .pids
+                .iter()
+                .filter_map(|pid| self.per_pid_net.rates.get(pid))
+                .map(|(rx, tx)| rx + tx)
+                .sum();
+        }
         sort_buckets(&mut buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
         self.buckets = buckets;
         // if selection references a bucket that vanished, fall back to All
@@ -1005,6 +1029,18 @@ impl App {
     /// Flat, ordered list of visible tree rows (what the sidebar renders).
     pub fn tree_rows(&self) -> Vec<TreeRow> {
         let mut out = Vec::new();
+        let bucket_net = |pids: &[u32]| -> u64 {
+            pids.iter()
+                .filter_map(|pid| self.per_pid_net.rates.get(pid))
+                .map(|(rx, tx)| rx + tx)
+                .sum()
+        };
+        let total_net: u64 = self
+            .per_pid_net
+            .rates
+            .values()
+            .map(|(rx, tx)| rx + tx)
+            .sum();
         // Synthetic "all" root.
         out.push(TreeRow {
             depth: 0,
@@ -1013,6 +1049,7 @@ impl App {
             is_expanded: false,
             cpu: self.buckets.iter().map(|b| b.cpu).sum(),
             mem: self.buckets.iter().map(|b| b.mem).sum(),
+            net: total_net,
             selection: Selection::All,
         });
         let searching = !self.search_query.is_empty();
@@ -1021,8 +1058,6 @@ impl App {
             if !self.bucket_visible(&label) {
                 continue;
             }
-            // While searching, force every visible bucket open so matching
-            // children are actually visible.
             let expanded = searching || !self.collapsed.contains(&label);
             out.push(TreeRow {
                 depth: 0,
@@ -1031,6 +1066,7 @@ impl App {
                 is_expanded: expanded,
                 cpu: bucket.cpu,
                 mem: bucket.mem,
+                net: bucket_net(&bucket.pids),
                 selection: Selection::Bucket(label.clone()),
             });
             if expanded {
@@ -1047,6 +1083,7 @@ impl App {
                     });
                     let limit = if self.search_query.is_empty() { 12 } else { 50 };
                     for p in procs.into_iter().take(limit) {
+                        let (rx, tx) = self.per_pid_net.rates.get(&p.pid).copied().unwrap_or((0, 0));
                         out.push(TreeRow {
                             depth: 1,
                             label: format!("{} [{}]", truncate_for_tree(&p.name, 18), p.pid),
@@ -1054,6 +1091,7 @@ impl App {
                             is_expanded: false,
                             cpu: p.cpu,
                             mem: p.mem,
+                            net: rx + tx,
                             selection: Selection::Process(label.clone(), p.pid),
                         });
                     }
@@ -1099,6 +1137,7 @@ pub struct TreeRow {
     pub is_expanded: bool,
     pub cpu: f32,
     pub mem: u64,
+    pub net: u64, // rx + tx B/s
     pub selection: Selection,
 }
 
@@ -1168,6 +1207,7 @@ fn sort_buckets(buckets: &mut [Bucket], key: SidebarSortKey, dir: SortDir) {
         let base = match key {
             SidebarSortKey::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
             SidebarSortKey::Mem => a.mem.cmp(&b.mem),
+            SidebarSortKey::Net => a.net.cmp(&b.net),
         };
         match dir {
             SortDir::Asc => base,
