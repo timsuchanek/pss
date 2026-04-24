@@ -103,6 +103,15 @@ async fn main() -> Result<()> {
         });
     }
 
+    // per-PID network rates via a streaming `nettop -d` child. Kept alive
+    // for the lifetime of `_per_pid_sampler`; Drop kills the child.
+    let _per_pid_sampler = {
+        let tx = tx.clone();
+        crate::netmon::PerPidSampler::spawn(move |r| {
+            let _ = tx.send(AppEvent::PerPidNet(r));
+        })
+    };
+
     // recommender task — only runs when a key is configured
     if has_llm {
         let tx = tx.clone();
@@ -146,6 +155,7 @@ async fn main() -> Result<()> {
                 AppEvent::Recommendations(r) => app.set_recommendations(r),
                 AppEvent::Thermal(t) => app.set_thermal(t),
                 AppEvent::Net(r) => app.set_net(r),
+                AppEvent::PerPidNet(r) => app.set_per_pid_net(r),
             }
         }
 
@@ -377,6 +387,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         KeyCode::Char('n') => app.set_sort(SortKey::Name),
+                        KeyCode::Char('w') => app.set_sort(SortKey::Net),
                         KeyCode::Char('T') => app.toggle_thermal_overlay(),
                         _ => {}
                     }

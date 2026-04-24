@@ -270,7 +270,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from("  tab             cycle panes"),
         Line::from("  enter            drill-down modal on selected process"),
         Line::from("  K                kill: signal menu (TERM/KILL/HUP/INT/…)"),
-        Line::from("  c / m / n        sort procs by cpu / mem / name"),
+        Line::from("  c / m / n / w    sort procs by cpu / mem / name / network"),
         Line::from("  /                fuzzy filter (nucleo)"),
         Line::from("  space            pause sampling"),
         Line::from("  [  /  ]          faster / slower sampling (250ms step)"),
@@ -626,7 +626,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let hint = if app.search_active {
         "type to filter · enter commit · esc cancel · ↑↓ nav"
     } else {
-        "j/k nav · enter drill · K kill · T therm · / search · space pause · [ ] rate · ? help · q quit"
+        "j/k nav · enter drill · K kill · c/m/n/w sort · T therm · / search · space pause · ? help · q quit"
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(

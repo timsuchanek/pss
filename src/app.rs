@@ -8,7 +8,7 @@ use crate::collector::{Collector, History, ProcSample, Snapshot};
 use crate::details::{self, Details};
 use crate::heuristics;
 use crate::llm::{LlmDigest, Recommendation};
-use crate::netmon::NetRates;
+use crate::netmon::{NetRates, PerPidRates};
 use crate::thermal::ThermalSnapshot;
 
 const LLM_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(45);
@@ -20,6 +20,7 @@ pub enum AppEvent {
     Recommendations(Vec<Recommendation>),
     Thermal(ThermalSnapshot),
     Net(NetRates),
+    PerPidNet(PerPidRates),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -73,6 +74,7 @@ pub enum SortKey {
     Cpu,
     Mem,
     Name,
+    Net,
 }
 
 impl SortKey {
@@ -81,6 +83,7 @@ impl SortKey {
             SortKey::Cpu => "cpu",
             SortKey::Mem => "mem",
             SortKey::Name => "name",
+            SortKey::Net => "net",
         }
     }
 }
@@ -186,6 +189,8 @@ pub struct App {
     pub thermal_scroll: u16,
     // aggregate network rates (macOS getifaddrs)
     pub net: Option<NetRates>,
+    // per-PID network rates (macOS nettop stream), pid -> (rx_bps, tx_bps)
+    pub per_pid_net: PerPidRates,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +259,7 @@ impl App {
         self.sort = match cfg.sort.processes.as_str() {
             "mem" => SortKey::Mem,
             "name" => SortKey::Name,
+            "net" => SortKey::Net,
             _ => SortKey::Cpu,
         };
 
@@ -289,6 +295,7 @@ impl App {
                 SortKey::Cpu => "cpu".into(),
                 SortKey::Mem => "mem".into(),
                 SortKey::Name => "name".into(),
+                SortKey::Net => "net".into(),
             },
         };
         out.filters = FiltersConfig {
@@ -346,6 +353,7 @@ impl App {
             show_thermal: false,
             thermal_scroll: 0,
             net: None,
+            per_pid_net: PerPidRates::default(),
         }
     }
 
@@ -355,6 +363,14 @@ impl App {
 
     pub fn set_net(&mut self, r: NetRates) {
         self.net = Some(r);
+    }
+
+    pub fn set_per_pid_net(&mut self, r: PerPidRates) {
+        self.per_pid_net = r;
+    }
+
+    pub fn pid_net_rate(&self, pid: u32) -> Option<(u64, u64)> {
+        self.per_pid_net.rates.get(&pid).copied()
     }
 
     pub fn toggle_thermal_overlay(&mut self) {
@@ -879,6 +895,11 @@ impl App {
             }),
             SortKey::Mem => v.sort_by(|a, b| b.mem.cmp(&a.mem)),
             SortKey::Name => v.sort_by(|a, b| a.name.cmp(&b.name)),
+            SortKey::Net => v.sort_by(|a, b| {
+                let pr_a = self.pid_net_rate(a.pid).unwrap_or((0, 0));
+                let pr_b = self.pid_net_rate(b.pid).unwrap_or((0, 0));
+                (pr_b.0 + pr_b.1).cmp(&(pr_a.0 + pr_a.1))
+            }),
         }
         v
     }

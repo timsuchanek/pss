@@ -29,6 +29,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .get(&p.pid)
                 .map(|v| spark(v, SPARK_WIDTH))
                 .unwrap_or_else(|| " ".repeat(SPARK_WIDTH));
+            let (rx_bps, tx_bps) = app.pid_net_rate(p.pid).unwrap_or((0, 0));
             Row::new(vec![
                 Cell::from(format!("{:>6}", p.pid)),
                 Cell::from(Span::styled(
@@ -40,6 +41,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::Cyan),
                 )),
                 Cell::from(format!("{:>5}M", mem_mb)),
+                Cell::from(Span::styled(
+                    format!("{:>7}", fmt_rate_u(tx_bps)),
+                    Style::default().fg(rate_color(tx_bps)),
+                )),
+                Cell::from(Span::styled(
+                    format!("{:>7}", fmt_rate_u(rx_bps)),
+                    Style::default().fg(rate_color(rx_bps)),
+                )),
                 Cell::from(truncate(&p.name, 18)),
                 Cell::from(Span::styled(
                     p.cmd.clone(),
@@ -49,14 +58,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let header = Row::new(vec!["pid", "cpu%", "last 60s", "mem", "name", "cmd"])
-        .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    let header = Row::new(vec![
+        "pid", "cpu%", "last 60s", "mem", "↑/s", "↓/s", "name", "cmd",
+    ])
+    .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
     let widths = [
         Constraint::Length(6),
         Constraint::Length(6),
         Constraint::Length(SPARK_WIDTH as u16),
         Constraint::Length(6),
+        Constraint::Length(7),
+        Constraint::Length(7),
         Constraint::Length(19),
         Constraint::Min(10),
     ];
@@ -79,6 +92,37 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol("▸ ");
 
     f.render_stateful_widget(table, area, &mut state);
+}
+
+fn fmt_rate_u(bps: u64) -> String {
+    if bps == 0 {
+        return "—".into();
+    }
+    let b = bps as f64;
+    if b >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1}G", b / 1024.0 / 1024.0 / 1024.0)
+    } else if b >= 1024.0 * 1024.0 {
+        format!("{:.1}M", b / 1024.0 / 1024.0)
+    } else if b >= 1024.0 {
+        format!("{:.0}K", b / 1024.0)
+    } else {
+        format!("{}B", bps)
+    }
+}
+
+fn rate_color(bps: u64) -> Color {
+    let mb = bps as f64 / 1024.0 / 1024.0;
+    if mb >= 10.0 {
+        Color::LightRed
+    } else if mb >= 1.0 {
+        Color::Yellow
+    } else if bps >= 1024 {
+        Color::Green
+    } else if bps > 0 {
+        Color::Gray
+    } else {
+        Color::DarkGray
+    }
 }
 
 fn cpu_color(cpu: f32) -> Color {
