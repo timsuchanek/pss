@@ -57,7 +57,8 @@ pub struct Bucket {
     pub key: BucketKey,
     pub cpu: f32,
     pub mem: u64,
-    pub net: u64, // rx + tx B/s aggregated across bucket.pids
+    pub net_rx: u64, // B/s aggregated across bucket.pids
+    pub net_tx: u64,
     pub pids: Vec<u32>,
 }
 
@@ -374,12 +375,13 @@ impl App {
         // Re-compute per-bucket net and re-sort so sidebar reflects the
         // fresh rates even between process snapshots.
         for b in self.buckets.iter_mut() {
-            b.net = b
+            let (rx, tx) = b
                 .pids
                 .iter()
                 .filter_map(|pid| self.per_pid_net.rates.get(pid))
-                .map(|(rx, tx)| rx + tx)
-                .sum();
+                .fold((0u64, 0u64), |acc, (r, t)| (acc.0 + r, acc.1 + t));
+            b.net_rx = rx;
+            b.net_tx = tx;
         }
         sort_buckets(&mut self.buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
     }
@@ -809,7 +811,8 @@ impl App {
                 key,
                 cpu: 0.0,
                 mem: 0,
-                net: 0,
+                net_rx: 0,
+                net_tx: 0,
                 pids: Vec::new(),
             });
             entry.cpu += p.cpu;
@@ -818,12 +821,13 @@ impl App {
         }
         let mut buckets: Vec<_> = map.into_values().collect();
         for b in buckets.iter_mut() {
-            b.net = b
+            let (rx, tx) = b
                 .pids
                 .iter()
                 .filter_map(|pid| self.per_pid_net.rates.get(pid))
-                .map(|(rx, tx)| rx + tx)
-                .sum();
+                .fold((0u64, 0u64), |acc, (r, t)| (acc.0 + r, acc.1 + t));
+            b.net_rx = rx;
+            b.net_tx = tx;
         }
         sort_buckets(&mut buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
         self.buckets = buckets;
@@ -1029,18 +1033,11 @@ impl App {
     /// Flat, ordered list of visible tree rows (what the sidebar renders).
     pub fn tree_rows(&self) -> Vec<TreeRow> {
         let mut out = Vec::new();
-        let bucket_net = |pids: &[u32]| -> u64 {
-            pids.iter()
-                .filter_map(|pid| self.per_pid_net.rates.get(pid))
-                .map(|(rx, tx)| rx + tx)
-                .sum()
-        };
-        let total_net: u64 = self
+        let (total_rx, total_tx) = self
             .per_pid_net
             .rates
             .values()
-            .map(|(rx, tx)| rx + tx)
-            .sum();
+            .fold((0u64, 0u64), |acc, (r, t)| (acc.0 + r, acc.1 + t));
         // Synthetic "all" root.
         out.push(TreeRow {
             depth: 0,
@@ -1049,7 +1046,8 @@ impl App {
             is_expanded: false,
             cpu: self.buckets.iter().map(|b| b.cpu).sum(),
             mem: self.buckets.iter().map(|b| b.mem).sum(),
-            net: total_net,
+            net_rx: total_rx,
+            net_tx: total_tx,
             selection: Selection::All,
         });
         let searching = !self.search_query.is_empty();
@@ -1066,7 +1064,8 @@ impl App {
                 is_expanded: expanded,
                 cpu: bucket.cpu,
                 mem: bucket.mem,
-                net: bucket_net(&bucket.pids),
+                net_rx: bucket.net_rx,
+                net_tx: bucket.net_tx,
                 selection: Selection::Bucket(label.clone()),
             });
             if expanded {
@@ -1091,7 +1090,8 @@ impl App {
                             is_expanded: false,
                             cpu: p.cpu,
                             mem: p.mem,
-                            net: rx + tx,
+                            net_rx: rx,
+                            net_tx: tx,
                             selection: Selection::Process(label.clone(), p.pid),
                         });
                     }
@@ -1137,7 +1137,8 @@ pub struct TreeRow {
     pub is_expanded: bool,
     pub cpu: f32,
     pub mem: u64,
-    pub net: u64, // rx + tx B/s
+    pub net_rx: u64, // B/s
+    pub net_tx: u64,
     pub selection: Selection,
 }
 
@@ -1207,7 +1208,7 @@ fn sort_buckets(buckets: &mut [Bucket], key: SidebarSortKey, dir: SortDir) {
         let base = match key {
             SidebarSortKey::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
             SidebarSortKey::Mem => a.mem.cmp(&b.mem),
-            SidebarSortKey::Net => a.net.cmp(&b.net),
+            SidebarSortKey::Net => (a.net_rx + a.net_tx).cmp(&(b.net_rx + b.net_tx)),
         };
         match dir {
             SortDir::Asc => base,

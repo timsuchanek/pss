@@ -11,8 +11,12 @@ use super::titled_block;
 // Fixed column widths (inside the sidebar block).
 pub const CPU_COL_W: usize = 7;
 pub const MEM_COL_W: usize = 7;
-pub const NET_COL_W: usize = 7;
+pub const NET_UP_COL_W: usize = 6;
+pub const NET_DN_COL_W: usize = 6;
 pub const COL_GUTTER: usize = 1;
+
+// Total width the net pair occupies incl. its inner gutter.
+pub const NET_PAIR_W: usize = NET_UP_COL_W + COL_GUTTER + NET_DN_COL_W;
 
 pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let active = app.pane == Pane::Sidebar;
@@ -43,8 +47,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
         .unwrap_or(0);
 
     let inner_w = list_rect.width as usize;
-    let label_w =
-        inner_w.saturating_sub(CPU_COL_W + MEM_COL_W + NET_COL_W + COL_GUTTER * 2);
+    let label_w = inner_w
+        .saturating_sub(CPU_COL_W + MEM_COL_W + NET_PAIR_W + COL_GUTTER * 2);
 
     let items: Vec<ListItem> = rows
         .iter()
@@ -80,10 +84,16 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     };
     let cpu_label = decorate("cpu", cpu_active);
     let mem_label = decorate("mem", mem_active);
-    let net_label = decorate("net", net_active);
+    // The net header shows ↑/↓ with the direction glyph on the active side.
+    let net_up_label = if net_active {
+        format!("↑ {}", app.sidebar_sort_dir.glyph())
+    } else {
+        "↑".to_string()
+    };
+    let net_dn_label = "↓".to_string();
 
     let label_w = (area.width as usize)
-        .saturating_sub(CPU_COL_W + MEM_COL_W + NET_COL_W + COL_GUTTER * 2);
+        .saturating_sub(CPU_COL_W + MEM_COL_W + NET_PAIR_W + COL_GUTTER * 2);
 
     let style_of = |active: bool| {
         if active {
@@ -106,7 +116,12 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::raw(" ".repeat(COL_GUTTER)),
         Span::styled(
-            format!("{:>width$}", net_label, width = NET_COL_W),
+            format!("{:>width$}", net_up_label, width = NET_UP_COL_W),
+            style_of(net_active),
+        ),
+        Span::raw(" ".repeat(COL_GUTTER)),
+        Span::styled(
+            format!("{:>width$}", net_dn_label, width = NET_DN_COL_W),
             style_of(net_active),
         ),
     ]);
@@ -139,7 +154,8 @@ fn render_row(r: &TreeRow, label_w: usize) -> Line<'static> {
     let cpu = format!("{:>width$.1}", r.cpu, width = CPU_COL_W - 1);
     let cpu_cell = format!("{}%", cpu);
     let mem_cell = format!("{:>width$}", fmt_mem(r.mem), width = MEM_COL_W);
-    let net_cell = format!("{:>width$}", fmt_rate(r.net), width = NET_COL_W);
+    let up_cell = format!("{:>width$}", fmt_rate(r.net_tx), width = NET_UP_COL_W);
+    let dn_cell = format!("{:>width$}", fmt_rate(r.net_rx), width = NET_DN_COL_W);
 
     Line::from(vec![
         Span::raw(indent),
@@ -149,7 +165,9 @@ fn render_row(r: &TreeRow, label_w: usize) -> Line<'static> {
         Span::raw(" ".repeat(COL_GUTTER)),
         Span::styled(mem_cell, Style::default().fg(mem_color(r.mem))),
         Span::raw(" ".repeat(COL_GUTTER)),
-        Span::styled(net_cell, Style::default().fg(net_color(r.net))),
+        Span::styled(up_cell, Style::default().fg(net_color(r.net_tx))),
+        Span::raw(" ".repeat(COL_GUTTER)),
+        Span::styled(dn_cell, Style::default().fg(net_color(r.net_rx))),
     ])
 }
 
