@@ -20,6 +20,8 @@ pub struct Config {
     pub sampling: SamplingConfig,
     #[serde(default)]
     pub state: StateConfig,
+    #[serde(default)]
+    pub external: ExternalConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -90,6 +92,27 @@ pub struct StateConfig {
     pub collapsed: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExternalConfig {
+    /// macOS app for "Open in editor" via `open -a` (e.g. "Cursor").
+    /// Empty => `open -t` (default text-edit app). A GUI app, not a TTY editor.
+    #[serde(default)]
+    pub editor: String,
+    /// macOS app for `open -a` in "Open in terminal".
+    #[serde(default = "default_terminal")]
+    pub terminal: String,
+}
+
+impl Default for ExternalConfig {
+    fn default() -> Self {
+        Self { editor: String::new(), terminal: default_terminal() }
+    }
+}
+
+fn default_terminal() -> String {
+    "Terminal".into()
+}
+
 fn default_model() -> String {
     "anthropic/claude-haiku-4.5".into()
 }
@@ -135,4 +158,21 @@ pub fn save(cfg: &Config) -> std::io::Result<()> {
 pub fn config_path() -> Option<PathBuf> {
     let dirs = ProjectDirs::from("", "", "pss")?;
     Some(dirs.config_dir().join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_defaults_to_terminal() {
+        let c = ExternalConfig::default();
+        assert_eq!(c.terminal, "Terminal");
+        assert!(c.editor.is_empty());
+    }
+
+    #[test]
+    fn config_default_includes_external() {
+        assert_eq!(Config::default().external.terminal, "Terminal");
+    }
 }
