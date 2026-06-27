@@ -146,11 +146,8 @@ async fn main() -> Result<()> {
                         let tx = tx.clone();
                         let llm = llm.clone();
                         tokio::spawn(async move {
-                            match llm.recommend(&digest).await {
-                                Ok(recs) => {
-                                    let _ = tx.send(AppEvent::Recommendations(recs));
-                                }
-                                Err(_) => {}
+                            if let Ok(recs) = llm.recommend(&digest).await {
+                                let _ = tx.send(AppEvent::Recommendations(recs));
                             }
                         });
                     }
@@ -162,6 +159,7 @@ async fn main() -> Result<()> {
             }
         }
 
+        app.expire_status();
         if last_render.elapsed() >= Duration::from_millis(100) {
             terminal.draw(|f| ui::render(f, &mut app))?;
             last_render = Instant::now();
@@ -271,6 +269,35 @@ async fn main() -> Result<()> {
                             }
                             KeyCode::Char('2') => {
                                 app.kill_with_signal(Signal::User2);
+                                continue;
+                            }
+                            _ => {
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Context menu hijacks input while open.
+                    if app.context_menu.is_some() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.context_menu_back();
+                                continue;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                app.context_menu_nav(1);
+                                continue;
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                app.context_menu_nav(-1);
+                                continue;
+                            }
+                            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                                app.context_menu_select();
+                                continue;
+                            }
+                            KeyCode::Char('h') | KeyCode::Left => {
+                                app.context_menu_pop_only();
                                 continue;
                             }
                             _ => {
@@ -392,6 +419,14 @@ async fn main() -> Result<()> {
                         KeyCode::Char('n') => app.set_sort(SortKey::Name),
                         KeyCode::Char('w') => app.set_sort(SortKey::Net),
                         KeyCode::Char('T') => app.toggle_thermal_overlay(),
+                        KeyCode::Char('x')
+                            if app.pane == crate::app::Pane::Sidebar => {
+                                if let Some(idx) = app.selected_tree_index() {
+                                    let sel = app.selection.clone();
+                                    let row = app.sidebar_list_top() + idx as u16;
+                                    app.open_context_menu(sel, 2, row);
+                                }
+                            }
                         _ => {}
                     }
                 }
@@ -425,7 +460,7 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
 
     // Sidebar rows: block top border at body_top, header row at body_top+1,
     // list rows start at body_top+2.
-    let sidebar_list_top = body_top + 2;
+    let sidebar_list_top = app.sidebar_list_top();
 
     // Process table: block top border at chart_bottom, header row at chart_bottom+1,
     // data rows start at chart_bottom+2. Data ends at recs_top - detail(2) - 1.
@@ -456,6 +491,11 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
 
     match ev.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // An open context menu consumes the click: pick an item or close.
+            if app.context_menu.is_some() {
+                app.context_menu_click(ev.column, ev.row);
+                return;
+            }
             // Close the drill-down modal if the user clicks outside it.
             if app.drilldown_pid.is_some() {
                 app.close_drilldown();
@@ -569,7 +609,6 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
             // Horizontal border: detail / recs
             if ev.row == recs_top && ev.column > sidebar_w {
                 app.begin_resize(ResizeTarget::RecsHeight);
-                return;
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -577,6 +616,29 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
         }
         MouseEventKind::Up(MouseButton::Left) => {
             app.end_resize();
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            // Don't stack the menu under another modal.
+            if app.kill_menu.is_some()
+                || app.show_thermal
+                || app.search_active
+                || app.drilldown_pid.is_some()
+            {
+                return;
+            }
+            if ev.column < sidebar_w
+                && ev.row >= sidebar_list_top
+                && ev.row < term_h - footer
+            {
+                let idx = (ev.row - sidebar_list_top) as usize;
+                let rows = app.tree_rows();
+                if let Some(row) = rows.get(idx) {
+                    app.selection = row.selection.clone();
+                    app.pane = Pane::Sidebar;
+                    let sel = row.selection.clone();
+                    app.open_context_menu(sel, ev.column + 1, ev.row + 1);
+                }
+            }
         }
         _ => {}
     }
