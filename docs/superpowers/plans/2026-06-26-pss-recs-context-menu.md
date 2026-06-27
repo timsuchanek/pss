@@ -178,7 +178,7 @@ This is one cohesive change: it makes `selected_rec` a consistent display index 
 
 **Interfaces:**
 - Consumes: `crate::llm::Recommendation`, `App::{recommendations, search_query, pid_visible, term_size, recs_height, selected_rec}`.
-- Produces: free fn `visible_rec_indices(...)`, `recs_list_top_geom(...)`; `App::{visible_recs, selected_rec_raw, recs_list_top, recs_offset}`.
+- Produces: free fns `visible_rec_indices(...)`, `recs_list_top_geom(...)`, `nav_display_index(sel, vis_len, down) -> usize`; `App::{visible_recs, selected_rec_raw, recs_list_top, recs_offset, recs_vis_rows}`.
 
 - [ ] **Step 1: Write the failing tests (pure projection + geometry)**
 
@@ -225,13 +225,46 @@ mod recs_tests {
         assert_eq!(recs_list_top_geom(50, 8), 50 - 1 - 8 + 1);
         assert_eq!(recs_list_top_geom(4, 8), 1); // saturating: recs_top=0 → 1
     }
+
+    #[test]
+    fn visible_projection_maps_display_to_raw() {
+        let recs = vec![
+            rec(Some(1), "a", "keep"),   // 0: reason matches "keep"
+            rec(Some(2), "b", "drop"),   // 1: filtered out (pid not visible, no text match)
+            rec(Some(3), "c", "keepit"), // 2: reason matches "keep"
+        ];
+        let vis = visible_rec_indices(&recs, "keep", |_| false);
+        assert_eq!(vis, vec![0, 2]);
+        // selected_rec is a display index → raw via vis.get(display):
+        assert_eq!(vis.first().copied(), Some(0)); // display 0 → raw 0
+        assert_eq!(vis.get(1).copied(), Some(2)); // display 1 → raw 2
+        // a stale display index clamps to the last visible (selected_rec_raw's rule)
+        assert_eq!(vis.get(9usize.min(vis.len() - 1)).copied(), Some(2));
+    }
+
+    #[test]
+    fn nav_display_index_clamps_stale_then_moves() {
+        // selection stale at 9 with only 2 visible: up clamps to 1 then steps to 0
+        assert_eq!(nav_display_index(9, 2, false), 0);
+        // down clamps to last (1) and stays — the regression the High flagged:
+        // the highlight now moves on the first keypress instead of going dead.
+        assert_eq!(nav_display_index(9, 2, true), 1);
+    }
+
+    #[test]
+    fn nav_display_index_normal_steps_and_bounds() {
+        assert_eq!(nav_display_index(2, 5, true), 3);
+        assert_eq!(nav_display_index(4, 5, true), 4); // at bottom, stays
+        assert_eq!(nav_display_index(0, 5, false), 0); // at top, stays
+        assert_eq!(nav_display_index(3, 0, true), 0); // empty list → 0
+    }
 }
 ```
 
 - [ ] **Step 2: Run them to confirm they fail**
 
 Run: `cargo test app::recs_tests -q` (or `cargo test recs_tests -q`)
-Expected: FAIL — `visible_rec_indices` / `recs_list_top_geom` not found.
+Expected: FAIL — `visible_rec_indices` / `recs_list_top_geom` / `nav_display_index` not found.
 
 - [ ] **Step 3: Add the projection field + free functions + App methods**
 
@@ -241,6 +274,8 @@ In `src/app.rs`, add the field to the `App` struct (after `pub term_size: (u16, 
     pub term_size: (u16, u16),
     // scroll offset of the recs list (display index of the first drawn row)
     pub recs_offset: usize,
+    // number of recs data rows actually drawn last frame (hit-test bound)
+    pub recs_vis_rows: usize,
 ```
 
 In `App::new()` (after `term_size: (80, 24),`) add:
@@ -248,6 +283,7 @@ In `App::new()` (after `term_size: (80, 24),`) add:
 ```rust
             term_size: (80, 24),
             recs_offset: 0,
+            recs_vis_rows: 0,
 ```
 
 Add these free functions at module scope (near the other free fns like `app_ancestor`):
@@ -289,6 +325,24 @@ pub fn recs_list_top_geom(term_h: u16, recs_height: u16) -> u16 {
     let recs_top = term_h.saturating_sub(1 + recs_height);
     recs_top + 1
 }
+
+/// Next display index for the recs pane: clamp a (possibly stale) selection into
+/// the current visible range, then step. `selected_rec` can outrun the visible
+/// list when a search/refresh shrinks the projection underneath it; render and
+/// `selected_rec_raw` already clamp on read, so nav must too — otherwise the
+/// first keypress after filtering moves a stale index and the highlight looks
+/// frozen. Pure — unit testable without an `App`.
+pub fn nav_display_index(sel: usize, vis_len: usize, down: bool) -> usize {
+    if vis_len == 0 {
+        return 0;
+    }
+    let cur = sel.min(vis_len - 1);
+    if down {
+        (cur + 1).min(vis_len - 1)
+    } else {
+        cur.saturating_sub(1)
+    }
+}
 ```
 
 Add these methods inside `impl App` (near `pid_visible`, line 851):
@@ -316,13 +370,21 @@ Add these methods inside `impl App` (near `pid_visible`, line 851):
 
 - [ ] **Step 4: Rewire the `selected_rec` consumers to the projection**
 
-In `nav_down` Recommendations branch (line 1057) change the bound to the visible length:
+In `nav_down` Recommendations branch (line 1057) clamp-then-step via the pure helper (normalize-on-read makes nav tolerant of a stale `selected_rec`):
 
 ```rust
             Pane::Recommendations => {
-                if self.selected_rec + 1 < self.visible_recs().len() {
-                    self.selected_rec += 1;
-                }
+                self.selected_rec =
+                    nav_display_index(self.selected_rec, self.visible_recs().len(), true);
+            }
+```
+
+In `nav_up` Recommendations branch (line 1082) do the same with `down = false` (this replaces the bare `saturating_sub(1)`, which did not clamp a stale index first):
+
+```rust
+            Pane::Recommendations => {
+                self.selected_rec =
+                    nav_display_index(self.selected_rec, self.visible_recs().len(), false);
             }
 ```
 
@@ -346,16 +408,27 @@ In `kill_selected`'s Recommendations branch (lines 1269-1272):
                 .and_then(|r| r.pid),
 ```
 
-In `set_recommendations` (lines 1303-1305) clamp against the visible length:
+In `set_recommendations` (lines 1303-1305) clamp against the **visible** length —
+`selected_rec` is a display index, so its domain is `visible_recs()`, not the raw
+vector (clamping to the raw `recommendations.len()` could leave it past the
+visible end). On an empty visible list `vis == 0`, so `vis.saturating_sub(1) == 0`
+(unsigned saturation floors at 0 — not `usize::MAX`, which would be `wrapping_sub`):
 
 ```rust
+        // selected_rec is a display index into visible_recs(); keep it in range.
+        // (Belt-and-suspenders: render, nav, and selected_rec_raw also clamp on
+        // read, so a stale value here is already harmless — this just keeps the
+        // stored value tidy when fresh recs arrive.)
         let vis = self.visible_recs().len();
         if self.selected_rec >= vis {
             self.selected_rec = vis.saturating_sub(1);
         }
 ```
 
-(`nav_up`'s `saturating_sub(1)` is already correct for a display index — leave it.)
+`refresh_local_recs` (the non-LLM refresh path) intentionally needs **no** clamp:
+every recs reader (render, nav via `nav_display_index`, `selected_rec_raw`)
+tolerates a stale display index, so we don't chase the invariant across every
+projection-mutation site — we make the readers tolerant instead.
 
 - [ ] **Step 5: Render the recs pane from the projection and store the offset**
 
@@ -392,6 +465,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     app.recs_offset = offset;
     let end = (offset + vis_rows).min(visible.len());
     let window = if offset < end { &visible[offset..end] } else { &[][..] };
+    // Store the count of data rows actually drawn so hit-tests reject clicks on
+    // rows that weren't rendered (short-terminal geometry gap → never a
+    // scrolled-off, non-visible rec under a destructive action).
+    app.recs_vis_rows = window.len();
 
     let items: Vec<ListItem> = if visible.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
@@ -458,7 +535,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
 }
 ```
 
-Update the call site in `src/ui/mod.rs:538` — it already passes `app` (which is `&mut App` in `render_body`), so only the callee signature changed; confirm it still reads `recommendations::render(f, right[3], app);` and compiles.
+The signature changes from `render(f, area, app: &App)` to `render(f, area, app: &mut App)`. **No call-site change is needed:** `render_body` (`src/ui/mod.rs:505`) is already `fn render_body(f, area, app: &mut App)` and calls `recommendations::render(f, right[3], app)` (`:538`), so it can reborrow `app` mutably. Confirm the call site still reads as-is and compiles.
 
 - [ ] **Step 6: Fix the left-click handler to use the projection**
 
@@ -477,7 +554,11 @@ Replace the "Recommendations row click" block (lines 580-598) with the projectio
                 && ev.row < recs_list_end.saturating_sub(1)
             {
                 let vr = (ev.row - recs_list_top) as usize;
-                if let Some(raw) = app.visible_recs().get(app.recs_offset + vr).copied() {
+                // Only rows that were actually drawn (guards the short-terminal gap).
+                let hit = (vr < app.recs_vis_rows)
+                    .then(|| app.visible_recs().get(app.recs_offset + vr).copied())
+                    .flatten();
+                if let Some(raw) = hit {
                     let display = app.recs_offset + vr;
                     let was_same = app.selected_rec == display && app.pane == Pane::Recommendations;
                     app.selected_rec = display;
@@ -650,7 +731,7 @@ git commit -m "feat(menu): open_for_rec + bucket_label_for_pid + CopyReason; cla
 - Modify: `src/main.rs` (recs branch in the `Down(MouseButton::Right)` arm; `x` Recommendations match arm)
 
 **Interfaces:**
-- Consumes: `App::{visible_recs, recs_offset, recs_list_top, selected_rec_raw, selected_rec, sidebar_width, open_context_menu_for_rec}`; locals `recs_list_top`, `recs_list_end`, `sidebar_w`.
+- Consumes: `App::{visible_recs, recs_offset, recs_vis_rows, recs_list_top, selected_rec_raw, selected_rec, sidebar_width, open_context_menu_for_rec}`; locals `recs_list_top`, `recs_list_end`, `sidebar_w`.
 
 - [ ] **Step 1: Add the recs branch to the right-click arm**
 
@@ -663,7 +744,12 @@ In `src/main.rs`, inside the `MouseEventKind::Down(MouseButton::Right) =>` arm, 
                 && ev.row < recs_list_end.saturating_sub(1)
             {
                 let vr = (ev.row - recs_list_top) as usize;
-                if let Some(raw) = app.visible_recs().get(app.recs_offset + vr).copied() {
+                // Only rows actually drawn (guards the short-terminal geometry gap
+                // so a right-click never targets a scrolled-off, non-visible rec).
+                let hit = (vr < app.recs_vis_rows)
+                    .then(|| app.visible_recs().get(app.recs_offset + vr).copied())
+                    .flatten();
+                if let Some(raw) = hit {
                     app.selected_rec = app.recs_offset + vr;
                     app.pane = Pane::Recommendations;
                     app.open_context_menu_for_rec(raw, ev.column + 1, ev.row + 1);
@@ -753,8 +839,10 @@ git commit -m "docs: note context menu on the suggestions pane"
 - `open_for_rec` no-ops on `None`; `x` bounds via `selected_rec_raw`/clamp → T4/T5. ✓
 - Shared `recs_list_top()` used by `handle_mouse` + new code, tested via `recs_list_top_geom` → T3. ✓
 - Data-row bound `ev.row < recs_list_end.saturating_sub(1)` on both recs hit-tests → T3, T5. ✓
-- Non-goals (process table, other verbs, short-terminal geometry edge) → not implemented. ✓
+- **Stale-selection tolerance (review High):** every recs reader clamps a stale `selected_rec` on read — render (`.min`), `selected_rec_raw` (`.min`), and nav (`nav_display_index` clamp-then-step, T3). No writer-side invariant to miss (e.g. `refresh_local_recs` needs no clamp). Regression covered by `nav_display_index_clamps_stale_then_moves` + the display→raw mapping test. ✓
+- **Short-terminal geometry (review residual → bounded):** renderer stores `recs_vis_rows` (drawn-row count); both hit-tests require `vr < recs_vis_rows`, so a click can never resolve to a scrolled-off, non-visible rec under a destructive action → T3, T5. ✓
+- Non-goals (process table, other recommendation verbs) → not implemented. The short-terminal geometry edge is now bounded-safe rather than left open. ✓
 
 **Placeholder scan:** none — every step carries complete code. ✓
 
-**Type consistency:** `CopyReason(String)` identical in T1 (variant), T4 (dispatch). `build_info_rec(Caps, String)` T1↔T4. `submenu_anchor(u16×6) -> (u16,u16)` T2↔T4. `visible_recs() -> Vec<usize>`, `recs_offset: usize`, `selected_rec_raw() -> Option<usize>`, `recs_list_top() -> u16` defined T3, consumed T3/T4/T5. `open_for_rec(app, usize, u16, u16)` T4↔delegator↔T5. `bucket_label_for_pid(&[Bucket], u32)` T4 (def + test). `Bucket { key, cpu, mem, net_rx, net_tx, pids }` literal matches the struct used in the prior feature's tests. ✓
+**Type consistency:** `CopyReason(String)` identical in T1 (variant), T4 (dispatch). `build_info_rec(Caps, String)` T1↔T4. `submenu_anchor(u16×6) -> (u16,u16)` T2↔T4. `visible_recs() -> Vec<usize>`, `recs_offset: usize`, `recs_vis_rows: usize`, `selected_rec_raw() -> Option<usize>`, `recs_list_top() -> u16`, `nav_display_index(usize, usize, bool) -> usize` defined T3, consumed T3/T4/T5. `open_for_rec(app, usize, u16, u16)` T4↔delegator↔T5. `bucket_label_for_pid(&[Bucket], u32)` T4 (def + test). `Bucket { key, cpu, mem, net_rx, net_tx, pids }` literal matches the struct used in the prior feature's tests. ✓
