@@ -1,4 +1,5 @@
 mod chart;
+pub mod context_menu;
 mod drilldown;
 mod processes;
 mod recommendations;
