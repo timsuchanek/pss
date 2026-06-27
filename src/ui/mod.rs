@@ -15,6 +15,7 @@ use crate::app::App;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let size = f.area();
+    app.term_size = (size.width, size.height);
 
     let search_h = if app.search_active || !app.search_query.is_empty() {
         1
@@ -46,6 +47,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
     }
     if app.kill_menu.is_some() {
         render_kill_menu(f, size, app);
+    }
+    if app.context_menu.is_some() {
+        context_menu::render(f, size, app);
     }
     if app.show_thermal {
         render_thermal_overlay(f, size, app);
@@ -624,16 +628,23 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    if let Some(msg) = app.status_text() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {} ", msg),
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
     let hint = if app.search_active {
         "type to filter · enter commit · esc cancel · ↑↓ nav"
     } else {
-        "j/k nav · enter drill · K kill · c/m/n/w sort · T therm · / search · space pause · ? help · q quit"
+        "j/k nav · enter drill · x menu · K kill · c/m/n/w sort · T therm · / search · space pause · ? help · q quit"
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::DarkGray),
-        ))),
+        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))),
         area,
     );
 }

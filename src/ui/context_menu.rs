@@ -88,3 +88,43 @@ mod tests {
         assert_eq!(menu_hit(rect, 40, 6, 3), Hit::Outside);
     }
 }
+
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
+
+use crate::app::App;
+
+/// Draw every level in the menu stack as an anchored, edge-clamped popup.
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(cm) = app.context_menu.as_ref() else {
+        return;
+    };
+    for level in &cm.levels {
+        let h = level.items.len() as u16 + 2;
+        let rect = place(level.origin_col, level.origin_row, MENU_W, h, area.width, area.height);
+        let lines: Vec<Line> = level
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let style = if !it.enabled {
+                    Style::default().fg(Color::DarkGray)
+                } else if i == level.selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let suffix = if it.opens_submenu { " ▸" } else { "" };
+                Line::from(Span::styled(format!(" {} {}{}", it.icon, it.label, suffix), style))
+            })
+            .collect();
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))),
+            rect,
+        );
+    }
+}
