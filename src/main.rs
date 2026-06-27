@@ -6,6 +6,7 @@ mod details;
 mod heuristics;
 mod llm;
 mod menu;
+mod menu_dispatch;
 mod netmon;
 mod thermal;
 mod ui;

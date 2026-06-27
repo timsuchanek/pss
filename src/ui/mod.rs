@@ -157,7 +157,7 @@ fn render_kill_menu(f: &mut Frame, area: Rect, app: &App) {
 
     let lines = vec![
         Line::from(Span::styled(
-            format!(" kill [{}] {}", menu.pid, truncate_label(&menu.name, 28)),
+            crate::app::kill_menu_title(&menu.targets, &truncate_label(&menu.name, 28)),
             Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),

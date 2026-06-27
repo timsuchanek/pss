@@ -186,6 +186,14 @@ pub struct App {
     pub sampler: Arc<SamplerCtl>,
     // kill signal menu
     pub kill_menu: Option<KillMenu>,
+    // transient status-line message (text, set-at instant)
+    pub status_msg: Option<(String, Instant)>,
+    // anchored context menu (None when closed)
+    pub context_menu: Option<crate::menu::ContextMenu>,
+    // editor/terminal config for external open actions
+    pub external: crate::actions::ExternalCfg,
+    // last-rendered terminal size (cols, rows); updated each render
+    pub term_size: (u16, u16),
     // native thermal sensors (macOS IOHID); empty on other platforms
     pub thermal: Option<ThermalSnapshot>,
     pub show_thermal: bool,
@@ -198,7 +206,7 @@ pub struct App {
 
 #[derive(Clone, Debug)]
 pub struct KillMenu {
-    pub pid: u32,
+    pub targets: Vec<u32>,
     pub name: String,
 }
 
@@ -276,6 +284,14 @@ impl App {
             .store(cfg.sampling.interval_ms.max(100), Ordering::Relaxed);
 
         self.collapsed = cfg.state.collapsed.iter().cloned().collect();
+        self.external = crate::actions::ExternalCfg {
+            editor: if cfg.external.editor.is_empty() {
+                None
+            } else {
+                Some(cfg.external.editor.clone())
+            },
+            terminal: cfg.external.terminal.clone(),
+        };
     }
 
     pub fn to_config_patch(&self, base: &crate::config::Config) -> crate::config::Config {
@@ -314,6 +330,10 @@ impl App {
         let mut collapsed: Vec<String> = self.collapsed.iter().cloned().collect();
         collapsed.sort();
         out.state = StateConfig { collapsed };
+        out.external = crate::config::ExternalConfig {
+            editor: self.external.editor.clone().unwrap_or_default(),
+            terminal: self.external.terminal.clone(),
+        };
         out
     }
 
@@ -354,6 +374,10 @@ impl App {
             self_pid: std::process::id(),
             sampler: Arc::new(SamplerCtl::new(1000)),
             kill_menu: None,
+            status_msg: None,
+            context_menu: None,
+            external: crate::actions::ExternalCfg::default(),
+            term_size: (80, 24),
             thermal: None,
             show_thermal: false,
             thermal_scroll: 0,
@@ -465,17 +489,101 @@ impl App {
             (pid, name)
         };
         if let Some(pid) = pid {
-            self.kill_menu = Some(KillMenu { pid, name });
+            self.kill_menu = Some(KillMenu { targets: vec![pid], name });
         }
+    }
+
+    pub fn open_kill_menu_targets(&mut self, targets: Vec<u32>, name: String) {
+        if targets.is_empty() {
+            return;
+        }
+        self.kill_menu = Some(KillMenu { targets, name });
     }
 
     pub fn close_kill_menu(&mut self) {
         self.kill_menu = None;
     }
 
+    pub fn set_status(&mut self, msg: String) {
+        self.status_msg = Some((msg, Instant::now()));
+    }
+
+    pub fn expire_status(&mut self) {
+        if let Some((_, at)) = &self.status_msg {
+            if at.elapsed().as_millis() > 2500 {
+                self.status_msg = None;
+            }
+        }
+    }
+
+    pub fn status_text(&self) -> Option<&str> {
+        self.status_msg.as_ref().map(|(s, _)| s.as_str())
+    }
+
+    pub fn search_height(&self) -> u16 {
+        if self.search_active || !self.search_query.is_empty() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// First sidebar list row (header 1 + search bar + block top + header row).
+    pub fn sidebar_list_top(&self) -> u16 {
+        1 + self.search_height() + 2
+    }
+
+    pub fn selected_tree_index(&self) -> Option<usize> {
+        self.tree_rows().iter().position(|r| r.selection == self.selection)
+    }
+
+    pub fn open_context_menu(&mut self, target: Selection, col: u16, row: u16) {
+        crate::menu_dispatch::open(self, target, col, row);
+    }
+
+    pub fn context_menu_nav(&mut self, delta: i32) {
+        if let Some(cm) = self.context_menu.as_mut() {
+            cm.nav(delta);
+        }
+    }
+
+    /// Esc/q: pop a submenu, or close the whole menu at the root.
+    pub fn context_menu_back(&mut self) {
+        let at_root = self.context_menu.as_mut().map(|cm| !cm.pop()).unwrap_or(true);
+        if at_root {
+            self.context_menu = None;
+        }
+    }
+
+    /// h/Left: pop a submenu only; a no-op at the root (does not close).
+    pub fn context_menu_pop_only(&mut self) {
+        if let Some(cm) = self.context_menu.as_mut() {
+            cm.pop();
+        }
+    }
+
+    pub fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
+    pub fn context_menu_select(&mut self) {
+        crate::menu_dispatch::select(self);
+    }
+
+    pub fn context_menu_click(&mut self, col: u16, row: u16) {
+        crate::menu_dispatch::click(self, col, row);
+    }
+
     pub fn kill_with_signal(&mut self, sig: sysinfo::Signal) {
         if let Some(m) = self.kill_menu.clone() {
-            kill_pid_signal(m.pid, sig);
+            crate::actions::send_signal_many(&m.targets, sig);
+            let n = m.targets.len();
+            self.set_status(format!(
+                "sent {} to {} proc{}",
+                signal_label(sig),
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
         }
         self.kill_menu = None;
     }
@@ -1218,15 +1326,48 @@ fn sort_buckets(buckets: &mut [Bucket], key: SidebarSortKey, dir: SortDir) {
 }
 
 fn kill_pid(pid: u32) {
-    kill_pid_signal(pid, sysinfo::Signal::Term);
+    crate::actions::send_signal(pid, sysinfo::Signal::Term);
 }
 
-fn kill_pid_signal(pid: u32, sig: sysinfo::Signal) {
-    use sysinfo::{Pid, ProcessesToUpdate};
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-    if let Some(proc) = sys.process(Pid::from_u32(pid)) {
-        proc.kill_with(sig);
+fn signal_label(sig: sysinfo::Signal) -> &'static str {
+    use sysinfo::Signal::*;
+    match sig {
+        Term => "SIGTERM",
+        Kill => "SIGKILL",
+        Hangup => "SIGHUP",
+        Interrupt => "SIGINT",
+        Stop => "SIGSTOP",
+        Continue => "SIGCONT",
+        Quit => "SIGQUIT",
+        User1 => "SIGUSR1",
+        User2 => "SIGUSR2",
+        _ => "signal",
+    }
+}
+
+/// Walk an executable path up to its nearest `.app` bundle directory, e.g.
+/// `/Applications/Foo.app` for `/Applications/Foo.app/Contents/MacOS/Foo`.
+pub(crate) fn app_ancestor(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = exe;
+    while let Some(parent) = cur.parent() {
+        let is_app = parent
+            .file_name()
+            .map(|n| n.to_string_lossy().ends_with(".app"))
+            .unwrap_or(false);
+        if is_app {
+            return Some(parent.to_path_buf());
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// Title for the kill/signal picker: single PID vs. an aggregated set.
+pub fn kill_menu_title(targets: &[u32], name: &str) -> String {
+    if targets.len() == 1 {
+        format!(" kill [{}] {}", targets[0], name)
+    } else {
+        format!(" kill {} procs · {}", targets.len(), name)
     }
 }
 
@@ -1246,4 +1387,29 @@ fn is_kernelish(p: &ProcSample) -> bool {
     // no cwd, no exe, and (often) uid 0. Keep conservative so regular root
     // processes with real cwds still show.
     p.cwd.is_none() && p.exe.is_none() && p.uid == Some(0)
+}
+
+#[cfg(test)]
+mod ctxmenu_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn app_ancestor_finds_bundle() {
+        assert_eq!(
+            app_ancestor(Path::new("/Applications/Foo.app/Contents/MacOS/Foo")),
+            Some(std::path::PathBuf::from("/Applications/Foo.app"))
+        );
+    }
+
+    #[test]
+    fn app_ancestor_none_for_plain_binary() {
+        assert_eq!(app_ancestor(Path::new("/usr/bin/ls")), None);
+    }
+
+    #[test]
+    fn kill_title_singular_and_plural() {
+        assert_eq!(kill_menu_title(&[42], "claude"), " kill [42] claude");
+        assert_eq!(kill_menu_title(&[1, 2, 3], "~/code/x"), " kill 3 procs · ~/code/x");
+    }
 }
