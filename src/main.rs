@@ -628,7 +628,7 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
             }
             if ev.column < sidebar_w
                 && ev.row >= sidebar_list_top
-                && ev.row < term_h - footer
+                && ev.row < term_h.saturating_sub(footer)
             {
                 let idx = (ev.row - sidebar_list_top) as usize;
                 let rows = app.tree_rows();
