@@ -154,7 +154,7 @@ mod macos {
                 let reader = BufReader::new(stdout);
                 let mut current: HashMap<u32, (u64, u64)> = HashMap::new();
                 let mut in_first_block = true; // first block is baseline totals, not deltas
-                for line in reader.lines().flatten() {
+                for line in reader.lines().map_while(Result::ok) {
                     if line.starts_with("time,") {
                         // Sample boundary — flush the previous block.
                         if !in_first_block {
