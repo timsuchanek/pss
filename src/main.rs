@@ -4,6 +4,7 @@ mod config;
 mod details;
 mod heuristics;
 mod llm;
+mod menu;
 mod netmon;
 mod thermal;
 mod ui;
