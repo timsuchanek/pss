@@ -562,10 +562,6 @@ impl App {
         }
     }
 
-    pub fn close_context_menu(&mut self) {
-        self.context_menu = None;
-    }
-
     pub fn context_menu_select(&mut self) {
         crate::menu_dispatch::select(self);
     }

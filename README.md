@@ -140,6 +140,8 @@ sorting
 
 actions
   Shift+K           kill — opens a signal menu (TERM/KILL/HUP/INT/STOP/…)
+  x  / right-click   context menu for the focused project/process
+                     (inspect · kill · suspend · renice · copy · reveal/open)
   space             pause / resume sampling
   [  /  ]           sampling interval -250ms / +250ms
 
@@ -156,7 +158,7 @@ global
   esc               clear filter / close overlay / quit
   q  /  ^C          quit
   mouse drag        resize panes at their shared borders
-  click             select row · click sidebar header to sort
+  click             select row · right-click for context menu · header to sort
 ```
 
 ### Drill-down modal (after `enter`)
