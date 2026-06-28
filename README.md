@@ -140,7 +140,7 @@ sorting
 
 actions
   Shift+K           kill — opens a signal menu (TERM/KILL/HUP/INT/STOP/…)
-  x  / right-click   context menu for the focused project/process
+  x  / right-click   context menu for the focused project / process / suggestion
                      (inspect · kill · suspend · renice · copy · reveal/open)
   space             pause / resume sampling
   [  /  ]           sampling interval -250ms / +250ms
