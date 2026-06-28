@@ -194,6 +194,10 @@ pub struct App {
     pub external: crate::actions::ExternalCfg,
     // last-rendered terminal size (cols, rows); updated each render
     pub term_size: (u16, u16),
+    // scroll offset of the recs list (display index of the first drawn row)
+    pub recs_offset: usize,
+    // number of recs data rows actually drawn last frame (hit-test bound)
+    pub recs_vis_rows: usize,
     // native thermal sensors (macOS IOHID); empty on other platforms
     pub thermal: Option<ThermalSnapshot>,
     pub show_thermal: bool,
@@ -378,6 +382,8 @@ impl App {
             context_menu: None,
             external: crate::actions::ExternalCfg::default(),
             term_size: (80, 24),
+            recs_offset: 0,
+            recs_vis_rows: 0,
             thermal: None,
             show_thermal: false,
             thermal_scroll: 0,
@@ -472,7 +478,7 @@ impl App {
                 }
             }
             Pane::Recommendations => {
-                let rec = self.recommendations.get(self.selected_rec);
+                let rec = self.selected_rec_raw().and_then(|raw| self.recommendations.get(raw));
                 let pid = rec.and_then(|r| r.pid);
                 let name = rec.map(|r| r.target.clone()).unwrap_or_default();
                 (pid, name)
@@ -855,6 +861,25 @@ impl App {
         }
     }
 
+    /// Raw indices of currently-visible recommendations, in display order.
+    pub fn visible_recs(&self) -> Vec<usize> {
+        visible_rec_indices(&self.recommendations, &self.search_query, |pid| self.pid_visible(pid))
+    }
+
+    /// Raw index of the selected recommendation (selected_rec is a display
+    /// index, clamped to the visible list); None when nothing is visible.
+    pub fn selected_rec_raw(&self) -> Option<usize> {
+        let vis = self.visible_recs();
+        if vis.is_empty() {
+            return None;
+        }
+        vis.get(self.selected_rec.min(vis.len() - 1)).copied()
+    }
+
+    pub fn recs_list_top(&self) -> u16 {
+        recs_list_top_geom(self.term_size.1, self.recs_height)
+    }
+
     pub fn bucket_visible(&self, label: &str) -> bool {
         match &self.fuzzy_bucket_labels {
             None => true,
@@ -1054,9 +1079,8 @@ impl App {
                 }
             }
             Pane::Recommendations => {
-                if self.selected_rec + 1 < self.recommendations.len() {
-                    self.selected_rec += 1;
-                }
+                self.selected_rec =
+                    nav_display_index(self.selected_rec, self.visible_recs().len(), true);
             }
         }
     }
@@ -1079,7 +1103,8 @@ impl App {
                 }
             }
             Pane::Recommendations => {
-                self.selected_rec = self.selected_rec.saturating_sub(1);
+                self.selected_rec =
+                    nav_display_index(self.selected_rec, self.visible_recs().len(), false);
             }
         }
     }
@@ -1267,8 +1292,8 @@ impl App {
         let pid = match self.pane {
             Pane::Processes | Pane::Sidebar => self.selected_pid(),
             Pane::Recommendations => self
-                .recommendations
-                .get(self.selected_rec)
+                .selected_rec_raw()
+                .and_then(|raw| self.recommendations.get(raw))
                 .and_then(|r| r.pid),
         };
         if let Some(pid) = pid {
@@ -1300,8 +1325,13 @@ impl App {
         self.recommendations = recs;
         self.recs_source = RecsSource::Llm;
         self.llm_received_at = Some(Instant::now());
-        if self.selected_rec >= self.recommendations.len() {
-            self.selected_rec = self.recommendations.len().saturating_sub(1);
+        // selected_rec is a display index into visible_recs(); keep it in range.
+        // (Belt-and-suspenders: render, nav, and selected_rec_raw also clamp on
+        // read, so a stale value here is already harmless — this just keeps the
+        // stored value tidy when fresh recs arrive.)
+        let vis = self.visible_recs().len();
+        if self.selected_rec >= vis {
+            self.selected_rec = vis.saturating_sub(1);
         }
     }
 }
@@ -1338,6 +1368,61 @@ fn signal_label(sig: sysinfo::Signal) -> &'static str {
         User1 => "SIGUSR1",
         User2 => "SIGUSR2",
         _ => "signal",
+    }
+}
+
+/// Raw indices of recommendations that pass the recs-pane filter, in display
+/// order. Mirrors the renderer's predicate. Pure — unit testable.
+pub fn visible_rec_indices(
+    recs: &[crate::llm::Recommendation],
+    query: &str,
+    is_pid_visible: impl Fn(u32) -> bool,
+) -> Vec<usize> {
+    let q = query.to_ascii_lowercase();
+    recs.iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            if query.is_empty() {
+                return Some(i);
+            }
+            if let Some(pid) = r.pid {
+                if is_pid_visible(pid) {
+                    return Some(i);
+                }
+            }
+            if r.target.to_ascii_lowercase().contains(&q)
+                || r.reason.to_ascii_lowercase().contains(&q)
+            {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// First recs data row: block top border at `term_h - (1 + recs_height)`, data
+/// starts one below. Matches `handle_mouse`'s inline geometry.
+pub fn recs_list_top_geom(term_h: u16, recs_height: u16) -> u16 {
+    let recs_top = term_h.saturating_sub(1 + recs_height);
+    recs_top + 1
+}
+
+/// Next display index for the recs pane: clamp a (possibly stale) selection into
+/// the current visible range, then step. `selected_rec` can outrun the visible
+/// list when a search/refresh shrinks the projection underneath it; render and
+/// `selected_rec_raw` already clamp on read, so nav must too — otherwise the
+/// first keypress after filtering moves a stale index and the highlight looks
+/// frozen. Pure — unit testable without an `App`.
+pub fn nav_display_index(sel: usize, vis_len: usize, down: bool) -> usize {
+    if vis_len == 0 {
+        return 0;
+    }
+    let cur = sel.min(vis_len - 1);
+    if down {
+        (cur + 1).min(vis_len - 1)
+    } else {
+        cur.saturating_sub(1)
     }
 }
 
@@ -1383,6 +1468,81 @@ fn is_kernelish(p: &ProcSample) -> bool {
     // no cwd, no exe, and (often) uid 0. Keep conservative so regular root
     // processes with real cwds still show.
     p.cwd.is_none() && p.exe.is_none() && p.uid == Some(0)
+}
+
+#[cfg(test)]
+mod recs_tests {
+    use super::*;
+    use crate::llm::Recommendation;
+
+    fn rec(pid: Option<u32>, target: &str, reason: &str) -> Recommendation {
+        Recommendation {
+            pid,
+            action: "kill".into(),
+            target: target.into(),
+            reason: reason.into(),
+            confidence: 90,
+            estimated_saved_mb: 0,
+        }
+    }
+
+    #[test]
+    fn empty_query_keeps_all_in_order() {
+        let recs = vec![rec(Some(1), "a", "x"), rec(None, "b", "y")];
+        assert_eq!(visible_rec_indices(&recs, "", |_| true), vec![0, 1]);
+    }
+
+    #[test]
+    fn query_filters_by_target_reason_or_visible_pid() {
+        let recs = vec![
+            rec(Some(1), "node", "idle server"),   // 0: matches "idle"
+            rec(Some(2), "claude", "busy"),        // 1: pid 2 visible
+            rec(None, "esbuild", "compiling"),     // 2: no match
+        ];
+        // pid 2 is "visible"; query "idle" matches rec 0's reason.
+        let got = visible_rec_indices(&recs, "idle", |pid| pid == 2);
+        assert_eq!(got, vec![0, 1]);
+    }
+
+    #[test]
+    fn recs_list_top_matches_geometry() {
+        // recs_top = term_h - (1 + recs_height); list top = recs_top + 1
+        assert_eq!(recs_list_top_geom(50, 8), 50 - 1 - 8 + 1);
+        assert_eq!(recs_list_top_geom(4, 8), 1); // saturating: recs_top=0 → 1
+    }
+
+    #[test]
+    fn visible_projection_maps_display_to_raw() {
+        let recs = vec![
+            rec(Some(1), "a", "keep"),   // 0: reason matches "keep"
+            rec(Some(2), "b", "drop"),   // 1: filtered out (pid not visible, no text match)
+            rec(Some(3), "c", "keepit"), // 2: reason matches "keep"
+        ];
+        let vis = visible_rec_indices(&recs, "keep", |_| false);
+        assert_eq!(vis, vec![0, 2]);
+        // selected_rec is a display index → raw via vis.get(display):
+        assert_eq!(vis.first().copied(), Some(0)); // display 0 → raw 0
+        assert_eq!(vis.get(1).copied(), Some(2)); // display 1 → raw 2
+        // a stale display index clamps to the last visible (selected_rec_raw's rule)
+        assert_eq!(vis.get(9usize.min(vis.len() - 1)).copied(), Some(2));
+    }
+
+    #[test]
+    fn nav_display_index_clamps_stale_then_moves() {
+        // selection stale at 9 with only 2 visible: up clamps to 1 then steps to 0
+        assert_eq!(nav_display_index(9, 2, false), 0);
+        // down clamps to last (1) and stays — the regression the High flagged:
+        // the highlight now moves on the first keypress instead of going dead.
+        assert_eq!(nav_display_index(9, 2, true), 1);
+    }
+
+    #[test]
+    fn nav_display_index_normal_steps_and_bounds() {
+        assert_eq!(nav_display_index(2, 5, true), 3);
+        assert_eq!(nav_display_index(4, 5, true), 4); // at bottom, stays
+        assert_eq!(nav_display_index(0, 5, false), 0); // at top, stays
+        assert_eq!(nav_display_index(3, 0, true), 0); // empty list → 0
+    }
 }
 
 #[cfg(test)]

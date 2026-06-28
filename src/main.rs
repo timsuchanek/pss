@@ -469,7 +469,7 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
     let processes_list_end = recs_top.saturating_sub(detail_h); // exclusive
 
     // Recs block: top border at recs_top, data rows start at recs_top + 1.
-    let recs_list_top = recs_top + 1;
+    let recs_list_top = app.recs_list_top();
     let recs_list_end = term_h.saturating_sub(footer); // exclusive
 
     // Sidebar header row lives at: body_top + block_top(1).
@@ -577,18 +577,23 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                     return;
                 }
             }
-            // Recommendations row click.
+            // Recommendations row click (projection-mapped; data rows only).
             if ev.column > sidebar_w
                 && ev.row >= recs_list_top
-                && ev.row < recs_list_end
+                && ev.row < recs_list_end.saturating_sub(1)
             {
-                let idx = (ev.row - recs_list_top) as usize;
-                if idx < app.recommendations.len() {
-                    let was_same = app.selected_rec == idx && app.pane == Pane::Recommendations;
-                    app.selected_rec = idx;
+                let vr = (ev.row - recs_list_top) as usize;
+                // Only rows that were actually drawn (guards the short-terminal gap).
+                let hit = (vr < app.recs_vis_rows)
+                    .then(|| app.visible_recs().get(app.recs_offset + vr).copied())
+                    .flatten();
+                if let Some(raw) = hit {
+                    let display = app.recs_offset + vr;
+                    let was_same = app.selected_rec == display && app.pane == Pane::Recommendations;
+                    app.selected_rec = display;
                     app.pane = Pane::Recommendations;
                     if was_same {
-                        if let Some(pid) = app.recommendations.get(idx).and_then(|r| r.pid) {
+                        if let Some(pid) = app.recommendations.get(raw).and_then(|r| r.pid) {
                             app.open_drilldown(pid);
                             app.ensure_drilldown_loaded_for_tab();
                         }

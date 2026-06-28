@@ -8,7 +8,7 @@ use crate::app::{App, Pane, RecsSource};
 
 use super::titled_block;
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
+pub fn render(f: &mut Frame, area: Rect, app: &mut App) {
     let active = app.pane == Pane::Recommendations;
     let source = match app.recs_source {
         RecsSource::Llm => "openrouter",
@@ -23,33 +23,36 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let title = format!("recommendations — {}", source);
     let block = titled_block(&title, active);
 
-    let filtered: Vec<&crate::llm::Recommendation> = app
-        .recommendations
-        .iter()
-        .filter(|r| {
-            if app.search_query.is_empty() {
-                return true;
-            }
-            if let Some(pid) = r.pid {
-                if app.pid_visible(pid) {
-                    return true;
-                }
-            }
-            let q = app.search_query.to_ascii_lowercase();
-            r.target.to_ascii_lowercase().contains(&q)
-                || r.reason.to_ascii_lowercase().contains(&q)
-        })
-        .collect();
+    // Shared visible projection (raw indices in display order).
+    let visible = app.visible_recs();
 
-    let items: Vec<ListItem> = if filtered.is_empty() {
+    // Window the visible list to what fits, keeping the selection on-screen,
+    // and store the offset so mouse/keyboard hit-tests map rows the same way.
+    let vis_rows = area.height.saturating_sub(2) as usize; // minus block borders
+    let offset = if visible.len() <= vis_rows || vis_rows == 0 {
+        0
+    } else {
+        let sel = app.selected_rec.min(visible.len() - 1);
+        sel.saturating_sub(vis_rows - 1).min(visible.len() - vis_rows)
+    };
+    app.recs_offset = offset;
+    let end = (offset + vis_rows).min(visible.len());
+    let window = if offset < end { &visible[offset..end] } else { &[][..] };
+    // Store the count of data rows actually drawn so hit-tests reject clicks on
+    // rows that weren't rendered (short-terminal geometry gap → never a
+    // scrolled-off, non-visible rec under a destructive action).
+    app.recs_vis_rows = window.len();
+
+    let items: Vec<ListItem> = if visible.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "  no matching recommendations.",
             Style::default().fg(Color::DarkGray),
         )))]
     } else {
-        filtered
+        window
             .iter()
-            .map(|r| {
+            .map(|&raw| {
+                let r = &app.recommendations[raw];
                 let icon = match r.action.as_str() {
                     "kill" => "☠",
                     "reclaim" => "◆",
@@ -83,10 +86,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                     ),
                     Span::raw(saved),
                     Span::raw("  "),
-                    Span::styled(
-                        truncate(&r.reason, 60),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(truncate(&r.reason, 60), Style::default().fg(Color::DarkGray)),
                 ]))
             })
             .collect()
@@ -100,8 +100,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 
     let mut state = ListState::default();
-    if active && !filtered.is_empty() {
-        state.select(Some(app.selected_rec.min(filtered.len() - 1)));
+    if active && !visible.is_empty() {
+        let sel = app.selected_rec.min(visible.len() - 1);
+        state.select(Some(sel - offset)); // position within the drawn window
     }
     f.render_stateful_widget(list, area, &mut state);
 }
