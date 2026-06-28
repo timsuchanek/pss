@@ -427,6 +427,16 @@ async fn main() -> Result<()> {
                                     app.open_context_menu(sel, 2, row);
                                 }
                             }
+                        KeyCode::Char('x')
+                            if app.pane == crate::app::Pane::Recommendations => {
+                                if let Some(raw) = app.selected_rec_raw() {
+                                    let vis_len = app.visible_recs().len();
+                                    let display = app.selected_rec.min(vis_len.saturating_sub(1));
+                                    let vr = display.saturating_sub(app.recs_offset) as u16;
+                                    let row = app.recs_list_top() + vr;
+                                    app.open_context_menu_for_rec(raw, app.sidebar_width + 2, row);
+                                }
+                            }
                         _ => {}
                     }
                 }
@@ -642,6 +652,23 @@ fn handle_mouse(app: &mut App, ev: MouseEvent, term_w: u16, term_h: u16) {
                     app.pane = Pane::Sidebar;
                     let sel = row.selection.clone();
                     app.open_context_menu(sel, ev.column + 1, ev.row + 1);
+                }
+            }
+            // Recommendations row: open the menu for the suggestion under the cursor.
+            if ev.column > sidebar_w
+                && ev.row >= recs_list_top
+                && ev.row < recs_list_end.saturating_sub(1)
+            {
+                let vr = (ev.row - recs_list_top) as usize;
+                // Only rows actually drawn (guards the short-terminal geometry gap
+                // so a right-click never targets a scrolled-off, non-visible rec).
+                let hit = (vr < app.recs_vis_rows)
+                    .then(|| app.visible_recs().get(app.recs_offset + vr).copied())
+                    .flatten();
+                if let Some(raw) = hit {
+                    app.selected_rec = app.recs_offset + vr;
+                    app.pane = Pane::Recommendations;
+                    app.open_context_menu_for_rec(raw, ev.column + 1, ev.row + 1);
                 }
             }
         }
