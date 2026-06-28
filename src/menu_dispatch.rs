@@ -326,7 +326,7 @@ mod tests {
     use crate::app::{Bucket, BucketKey};
 
     fn bucket(key: BucketKey, pids: Vec<u32>) -> Bucket {
-        Bucket { key, cpu: 0.0, mem: 0, net_rx: 0, net_tx: 0, pids }
+        Bucket { key, cpu: 0.0, cpu_sort: 0.0, mem: 0, net_rx: 0, net_tx: 0, pids }
     }
 
     #[test]

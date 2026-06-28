@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -56,6 +56,9 @@ fn display_path(p: &PathBuf) -> String {
 pub struct Bucket {
     pub key: BucketKey,
     pub cpu: f32,
+    /// Smoothed CPU (EWMA) used only for sort ordering, so the sidebar doesn't
+    /// reshuffle on every noisy 1s sample. `cpu` stays the live displayed value.
+    pub cpu_sort: f32,
     pub mem: u64,
     pub net_rx: u64, // B/s aggregated across bucket.pids
     pub net_tx: u64,
@@ -206,6 +209,12 @@ pub struct App {
     pub net: Option<NetRates>,
     // per-PID network rates (macOS nettop stream), pid -> (rx_bps, tx_bps)
     pub per_pid_net: PerPidRates,
+    // running EWMA of each bucket's CPU, keyed by bucket identity; drives a
+    // stable sort order so the sidebar stops jumping every sample tick.
+    pub cpu_ewma: HashMap<BucketKey, f32>,
+    // running EWMA of each PID's CPU; stabilises the order of expanded child
+    // rows under a bucket the same way `cpu_ewma` stabilises the buckets.
+    pub pid_cpu_ewma: HashMap<u32, f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -389,6 +398,8 @@ impl App {
             thermal_scroll: 0,
             net: None,
             per_pid_net: PerPidRates::default(),
+            cpu_ewma: HashMap::new(),
+            pid_cpu_ewma: HashMap::new(),
         }
     }
 
@@ -943,6 +954,7 @@ impl App {
             let entry = map.entry(key.clone()).or_insert_with(|| Bucket {
                 key,
                 cpu: 0.0,
+                cpu_sort: 0.0,
                 mem: 0,
                 net_rx: 0,
                 net_tx: 0,
@@ -962,6 +974,27 @@ impl App {
             b.net_rx = rx;
             b.net_tx = tx;
         }
+        // Update the per-bucket CPU EWMA (drives a stable sort order) and prune
+        // entries for buckets that no longer exist.
+        let alpha = ewma_alpha(self.sample_interval_ms() as f32 / 1000.0, SIDEBAR_SORT_HALF_LIFE_SECS);
+        for b in buckets.iter_mut() {
+            let prev = self.cpu_ewma.get(&b.key).copied();
+            let smoothed = ewma_step(prev, b.cpu, alpha);
+            self.cpu_ewma.insert(b.key.clone(), smoothed);
+            b.cpu_sort = smoothed;
+        }
+        self.cpu_ewma.retain(|k, _| buckets.iter().any(|b| &b.key == k));
+        // Per-PID CPU EWMA so expanded child rows under a bucket are ordered
+        // by the same stable signal (see `tree_rows`).
+        for p in &snap.procs {
+            if !self.proc_passes_filters(p) {
+                continue;
+            }
+            let prev = self.pid_cpu_ewma.get(&p.pid).copied();
+            self.pid_cpu_ewma.insert(p.pid, ewma_step(prev, p.cpu, alpha));
+        }
+        let live: HashSet<u32> = buckets.iter().flat_map(|b| b.pids.iter().copied()).collect();
+        self.pid_cpu_ewma.retain(|pid, _| live.contains(pid));
         sort_buckets(&mut buckets, self.sidebar_sort_key, self.sidebar_sort_dir);
         self.buckets = buckets;
         // if selection references a bucket that vanished, fall back to All
@@ -1211,7 +1244,11 @@ impl App {
                         .filter(|p| pids.contains(&p.pid) && self.pid_visible(p.pid))
                         .collect();
                     procs.sort_by(|a, b| {
-                        b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)
+                        // Smoothed CPU keeps child rows from reshuffling each tick;
+                        // fall back to live cpu before the first EWMA sample lands.
+                        let ca = self.pid_cpu_ewma.get(&a.pid).copied().unwrap_or(a.cpu);
+                        let cb = self.pid_cpu_ewma.get(&b.pid).copied().unwrap_or(b.cpu);
+                        cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     let limit = if self.search_query.is_empty() { 12 } else { 50 };
                     for p in procs.into_iter().take(limit) {
@@ -1340,11 +1377,38 @@ impl App {
     }
 }
 
+/// Half-life of the sidebar CPU sort smoothing, in seconds. Gentle: the order
+/// settles over a few samples but still reacts to a sustained change quickly.
+const SIDEBAR_SORT_HALF_LIFE_SECS: f32 = 3.0;
+
+/// EWMA blend factor for a sample interval `dt_secs` against a target
+/// `half_life_secs`. Derived from the half-life so the smoothing stays constant
+/// in wall-clock time even if the sample interval changes. Returns a value in
+/// `(0, 1]`: larger = more responsive, `1.0` = no smoothing.
+fn ewma_alpha(dt_secs: f32, half_life_secs: f32) -> f32 {
+    if half_life_secs <= 0.0 || dt_secs <= 0.0 {
+        return if dt_secs <= 0.0 { 0.0 } else { 1.0 };
+    }
+    1.0 - 0.5_f32.powf(dt_secs / half_life_secs)
+}
+
+/// One EWMA step. Seeds with the first sample (no ramp-up from zero), so a newly
+/// appearing bucket sorts at its true CPU immediately.
+fn ewma_step(prev: Option<f32>, sample: f32, alpha: f32) -> f32 {
+    match prev {
+        Some(p) => p + alpha * (sample - p),
+        None => sample,
+    }
+}
+
 fn sort_buckets(buckets: &mut [Bucket], key: SidebarSortKey, dir: SortDir) {
     use std::cmp::Ordering;
     buckets.sort_by(|a, b| {
         let base = match key {
-            SidebarSortKey::Cpu => a.cpu.partial_cmp(&b.cpu).unwrap_or(Ordering::Equal),
+            // Sort by smoothed CPU so the order doesn't churn on noisy 1s samples;
+            // the displayed `cpu` stays live. Stable sort + BTreeMap-ordered input
+            // keep ties deterministic.
+            SidebarSortKey::Cpu => a.cpu_sort.partial_cmp(&b.cpu_sort).unwrap_or(Ordering::Equal),
             SidebarSortKey::Mem => a.mem.cmp(&b.mem),
             SidebarSortKey::Net => (a.net_rx + a.net_tx).cmp(&(b.net_rx + b.net_tx)),
         };
@@ -1571,5 +1635,52 @@ mod ctxmenu_tests {
     fn kill_title_singular_and_plural() {
         assert_eq!(kill_menu_title(&[42], "claude"), " kill [42] claude");
         assert_eq!(kill_menu_title(&[1, 2, 3], "~/code/x"), " kill 3 procs · ~/code/x");
+    }
+}
+
+#[cfg(test)]
+mod smoothing_tests {
+    use super::*;
+
+    #[test]
+    fn ewma_alpha_from_half_life() {
+        // At dt == half_life, one step closes exactly half the gap.
+        assert!((ewma_alpha(3.0, 3.0) - 0.5).abs() < 1e-6);
+        // Gentle default: dt=1s, half_life=3s → ~0.206.
+        assert!((ewma_alpha(1.0, 3.0) - 0.2063).abs() < 1e-3);
+        // Degenerate guards: no time elapsed → no movement; no half-life → no smoothing.
+        assert_eq!(ewma_alpha(0.0, 3.0), 0.0);
+        assert_eq!(ewma_alpha(1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn ewma_step_seeds_then_converges() {
+        // First sample seeds directly (no ramp from zero).
+        assert_eq!(ewma_step(None, 12.0, 0.2), 12.0);
+        // alpha=1 tracks the sample exactly; alpha=0 holds the previous value.
+        assert_eq!(ewma_step(Some(4.0), 10.0, 1.0), 10.0);
+        assert_eq!(ewma_step(Some(4.0), 10.0, 0.0), 4.0);
+        // Half-gap step.
+        assert_eq!(ewma_step(Some(0.0), 10.0, 0.5), 5.0);
+    }
+
+    #[test]
+    fn ewma_damps_a_transient_spike() {
+        // A bucket idling at 2% briefly spikes to 80%; with gentle smoothing the
+        // sort metric barely moves, so it won't leap over a steady 20% bucket.
+        let alpha = ewma_alpha(1.0, SIDEBAR_SORT_HALF_LIFE_SECS); // ~0.206
+        let spiked = ewma_step(Some(2.0), 80.0, alpha);
+        assert!(spiked < 20.0, "single spike ({spiked}) must stay below a steady 20%");
+    }
+
+    #[test]
+    fn ewma_follows_a_sustained_rise() {
+        // Sustained load converges toward the new level within a few samples.
+        let alpha = ewma_alpha(1.0, SIDEBAR_SORT_HALF_LIFE_SECS);
+        let mut v = ewma_step(None, 2.0, alpha);
+        for _ in 0..8 {
+            v = ewma_step(Some(v), 50.0, alpha);
+        }
+        assert!(v > 40.0, "sustained 50% should converge past 40% (got {v})");
     }
 }
