@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use crate::actions::{self, ShellAction};
-use crate::app::{app_ancestor, App, BucketKey, Selection};
+use crate::app::{app_ancestor, App, Bucket, BucketKey, Selection};
 use crate::menu::{self, BucketKind, ContextMenu, MenuAction, Outcome};
-use crate::ui::context_menu::{menu_hit, place, submenu_origin, Hit, MENU_W};
+use crate::ui::context_menu::{menu_hit, place, submenu_anchor, Hit, MENU_W};
 
 /// Build and open the context menu for `target`, anchored at `(col, row)`.
 pub(crate) fn open(app: &mut App, target: Selection, col: u16, row: u16) {
@@ -35,6 +35,30 @@ pub(crate) fn open(app: &mut App, target: Selection, col: u16, row: u16) {
         }
     };
     app.context_menu = Some(ContextMenu::new(target, items, col, row));
+}
+
+/// Open the context menu for recommendation `raw_idx`: the full process menu
+/// when the suggestion targets a *live* process, else a `Copy reason` menu.
+pub(crate) fn open_for_rec(app: &mut App, raw_idx: usize, col: u16, row: u16) {
+    let (pid, reason) = match app.recommendations.get(raw_idx) {
+        Some(r) => (r.pid, r.reason.clone()),
+        None => return,
+    };
+    match pid {
+        Some(pid) if app.process_by_pid(pid).is_some() => {
+            let label = bucket_label_for_pid(&app.buckets, pid).unwrap_or_default();
+            open(app, Selection::Process(label, pid), col, row);
+        }
+        _ => {
+            let items = menu::build_info_rec(actions::caps(), reason);
+            app.context_menu = Some(ContextMenu::new(Selection::All, items, col, row));
+        }
+    }
+}
+
+/// Label of the bucket that owns `pid`, if any.
+pub(crate) fn bucket_label_for_pid(buckets: &[Bucket], pid: u32) -> Option<String> {
+    buckets.iter().find(|b| b.pids.contains(&pid)).map(|b| b.key.label())
 }
 
 /// Activate the selected item: open a submenu, hand off to the kill picker, or
@@ -93,11 +117,17 @@ pub(crate) fn click(app: &mut App, col: u16, row: u16) {
 
 fn open_submenu(app: &mut App) {
     let items = menu::build_renice();
-    let sw = app.term_size.0;
+    let (sw, sh) = app.term_size;
     if let Some(cm) = app.context_menu.as_mut() {
         if let Some(level) = cm.levels.last() {
-            let col = submenu_origin(level.origin_col, MENU_W, MENU_W, sw);
-            let row = level.origin_row + level.selected as u16;
+            let (col, row) = submenu_anchor(
+                level.origin_col,
+                level.origin_row,
+                level.items.len() as u16,
+                level.selected as u16,
+                sw,
+                sh,
+            );
             cm.push(items, col, row);
         }
     }
@@ -293,11 +323,27 @@ pub(crate) fn buckets_to_collapse(labels: &[String], keep: &str) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{Bucket, BucketKey};
+
+    fn bucket(key: BucketKey, pids: Vec<u32>) -> Bucket {
+        Bucket { key, cpu: 0.0, mem: 0, net_rx: 0, net_tx: 0, pids }
+    }
 
     #[test]
     fn focus_collapses_all_but_kept() {
         let labels = vec!["(system)".to_string(), "Foo.app (bundle)".to_string(), "~/code/x".to_string()];
         let got = buckets_to_collapse(&labels, "Foo.app (bundle)");
         assert_eq!(got, vec!["(system)".to_string(), "~/code/x".to_string()]);
+    }
+
+    #[test]
+    fn bucket_label_for_pid_finds_owner() {
+        let buckets = vec![
+            bucket(BucketKey::System, vec![1, 2]),
+            bucket(BucketKey::Bundle("Foo.app".into()), vec![9]),
+        ];
+        assert_eq!(bucket_label_for_pid(&buckets, 9), Some("Foo.app (bundle)".to_string()));
+        assert_eq!(bucket_label_for_pid(&buckets, 1), Some("(system)".to_string()));
+        assert_eq!(bucket_label_for_pid(&buckets, 42), None);
     }
 }

@@ -547,6 +547,10 @@ impl App {
         crate::menu_dispatch::open(self, target, col, row);
     }
 
+    pub fn open_context_menu_for_rec(&mut self, idx: usize, col: u16, row: u16) {
+        crate::menu_dispatch::open_for_rec(self, idx, col, row);
+    }
+
     pub fn context_menu_nav(&mut self, delta: i32) {
         if let Some(cm) = self.context_menu.as_mut() {
             cm.nav(delta);
