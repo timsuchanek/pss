@@ -34,10 +34,11 @@
 
 **Files:**
 - Modify: `src/menu.rs` (enum at line 27; add builder + test)
+- Modify: `src/menu_dispatch.rs` (`run_action` exhaustive match — add the `CopyReason` arm so the crate compiles; this is the exact arm Task 4 would have added, pulled forward to resolve the enum-exhaustiveness compile coupling)
 
 **Interfaces:**
-- Consumes: `Caps`, `MenuItem`, the private `item(...)` helper, `Outcome` (its `_ => Close` arm covers the new variant).
-- Produces: `MenuAction::CopyReason(String)`; `pub fn build_info_rec(caps: Caps, reason: String) -> Vec<MenuItem>`.
+- Consumes: `Caps`, `MenuItem`, the private `item(...)` helper, `Outcome` (its `_ => Close` arm covers the new variant); `menu_dispatch::copy(app, &str, String)`.
+- Produces: `MenuAction::CopyReason(String)`; `pub fn build_info_rec(caps: Caps, reason: String) -> Vec<MenuItem>`; the `A::CopyReason` dispatch arm in `run_action` (status-sets `copied reason`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -80,15 +81,38 @@ pub fn build_info_rec(caps: Caps, reason: String) -> Vec<MenuItem> {
 }
 ```
 
-- [ ] **Step 4: Run the test**
+- [ ] **Step 4: Keep the dispatcher's exhaustive match compiling**
 
-Run: `cargo test menu:: -q`
-Expected: PASS (all menu tests, including the new one).
+`run_action` in `src/menu_dispatch.rs` matches `MenuAction` exhaustively, so the
+new variant breaks compilation (E0004) until it has an arm. Add the real
+dispatch arm now (it's the exact code Task 4 specifies — pulled forward, not new
+design). In `src/menu_dispatch.rs`'s `run_action`, change the final arm:
 
-- [ ] **Step 5: Commit**
+```rust
+        // Handled before dispatch.
+        A::OpenKill | A::OpenReniceSubmenu => {}
+```
+
+to:
+
+```rust
+        A::CopyReason(text) => copy(app, &text, "copied reason".into()),
+        // Handled before dispatch.
+        A::OpenKill | A::OpenReniceSubmenu => {}
+```
+
+(`copy(app: &mut App, text: &str, ok: String)` already exists in `menu_dispatch.rs`;
+`text` binds by value as `String`, `&text` coerces to `&str`.)
+
+- [ ] **Step 5: Run the tests**
+
+Run: `cargo test -q` (full crate — `cargo test menu::` compiles the whole binary anyway, so the dispatcher arm must be in place).
+Expected: PASS — all tests including the new one; no E0004.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/menu.rs
+git add src/menu.rs src/menu_dispatch.rs
 git commit -m "feat(menu): CopyReason action + build_info_rec for info suggestions"
 ```
 
@@ -669,9 +693,12 @@ pub(crate) fn bucket_label_for_pid(buckets: &[Bucket], pid: u32) -> Option<Strin
 }
 ```
 
-- [ ] **Step 5: Dispatch `CopyReason` and fix `open_submenu`**
+- [ ] **Step 5: Fix `open_submenu`**
 
-In `run_action`, add an arm before the final `OpenKill | OpenReniceSubmenu` arm (after the `CollapseAll` arm, ~line 207):
+The `A::CopyReason(text) => copy(app, &text, "copied reason".into())` dispatch arm
+was already added in Task 1 (to keep `run_action`'s exhaustive match compiling).
+**Verify it is present; do not re-add it** (a duplicate match arm fails to compile).
+It should sit just before the final `A::OpenKill | A::OpenReniceSubmenu => {}` arm:
 
 ```rust
         A::CopyReason(text) => copy(app, &text, "copied reason".into()),
