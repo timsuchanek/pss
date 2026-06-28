@@ -37,6 +37,21 @@ pub fn submenu_origin(parent_col: u16, parent_w: u16, sub_w: u16, screen_w: u16)
     }
 }
 
+/// Top-left anchor for a submenu of width `MENU_W` opened from a parent level:
+/// computed against the parent's *placed* (edge-clamped) rect so it stays
+/// aligned to what was drawn, flipping left when the right side has no room.
+pub fn submenu_anchor(
+    origin_col: u16,
+    origin_row: u16,
+    n_items: u16,
+    selected: u16,
+    sw: u16,
+    sh: u16,
+) -> (u16, u16) {
+    let placed = place(origin_col, origin_row, MENU_W, n_items + 2, sw, sh);
+    (submenu_origin(placed.x, MENU_W, MENU_W, sw), placed.y + selected)
+}
+
 /// Classify a click against a popup `rect` containing `n_items` rows (between
 /// the top and bottom border rows).
 pub fn menu_hit(rect: Rect, col: u16, row: u16, n_items: u16) -> Hit {
@@ -86,6 +101,24 @@ mod tests {
         assert_eq!(menu_hit(rect, 6, 5, 3), Hit::Border);
         assert_eq!(menu_hit(rect, 6, 9, 3), Hit::Border);
         assert_eq!(menu_hit(rect, 40, 6, 3), Hit::Outside);
+    }
+
+    #[test]
+    fn submenu_anchor_opens_right_in_open_space() {
+        // place(10,5,26,6,200,50) = (10,5); submenu_origin(10,26,26,200)=36; row=5+1
+        assert_eq!(submenu_anchor(10, 5, 4, 1, 200, 50), (36, 6));
+    }
+
+    #[test]
+    fn submenu_anchor_flips_left_at_right_edge() {
+        // parent clamps to x=174; submenu has no room right → 174-26=148
+        assert_eq!(submenu_anchor(180, 5, 4, 1, 200, 50), (148, 6));
+    }
+
+    #[test]
+    fn submenu_anchor_follows_bottom_clamp() {
+        // place(10,48,26,6,200,50).y → 50-6=44; row=44+selected
+        assert_eq!(submenu_anchor(10, 48, 4, 1, 200, 50), (36, 45));
     }
 }
 
