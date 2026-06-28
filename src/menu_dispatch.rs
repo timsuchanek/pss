@@ -205,6 +205,7 @@ fn run_action(app: &mut App, action: MenuAction, target: Selection) {
                 app.collapsed.insert(l);
             }
         }
+        A::CopyReason(text) => copy(app, &text, "copied reason".into()),
         // Handled before dispatch.
         A::OpenKill | A::OpenReniceSubmenu => {}
     }

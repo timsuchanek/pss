@@ -34,6 +34,7 @@ pub enum MenuAction {
     CopyPid,
     CopyCommand,
     CopyPath,
+    CopyReason(String),
     RevealExe,
     RevealDir,
     OpenEditor,
@@ -208,6 +209,10 @@ pub fn build_all() -> Vec<MenuItem> {
     ]
 }
 
+pub fn build_info_rec(caps: Caps, reason: String) -> Vec<MenuItem> {
+    vec![item("⧉", "Copy reason", MenuAction::CopyReason(reason), caps.clipboard, false)]
+}
+
 pub fn build_renice() -> Vec<MenuItem> {
     vec![
         item("△", "High (-10)", MenuAction::Renice(-10), true, false),
@@ -358,5 +363,16 @@ mod tests {
         assert_eq!(cm.levels.len(), 2);
         assert!(cm.pop());
         assert_eq!(cm.levels.len(), 1);
+    }
+
+    #[test]
+    fn info_rec_menu_is_copy_reason_gated_by_clipboard() {
+        let m = build_info_rec(ALL, "idle 90s".to_string());
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MenuAction::CopyReason("idle 90s".to_string()));
+        assert!(m[0].enabled);
+        assert!(!m[0].opens_submenu);
+        let m2 = build_info_rec(NO_GUI, "x".to_string());
+        assert!(!m2[0].enabled, "Copy reason disabled without clipboard");
     }
 }
